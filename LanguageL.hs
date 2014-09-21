@@ -5,6 +5,13 @@ import Data.Function (on)
 import Data.List (intercalate)
 import qualified Data.Map as Map
 
+import Text.ParserCombinators.Parsec (GenParser, (<|>), (<?>), satisfy, many, parse, char, string, try)
+import Text.ParserCombinators.Parsec.Combinator (many1)
+import Text.ParserCombinators.Parsec.Expr (Operator (..), Assoc (..), buildExpressionParser)
+import Data.Char (isAlpha, isDigit, isSpace)
+import Control.Applicative ((<$>), (<*>))
+
+
 type ErrorHandler a = String -> a
 
 languageLError message = error ("[Language L] " ++ message ++ ".")
@@ -41,6 +48,7 @@ data Expression = C Integer
 
                 | Expression :|| Expression
                 | Expression :&& Expression
+  deriving (Eq)
 
 data Associativity = LeftA | RightA | NonA deriving (Eq)
 
@@ -194,6 +202,7 @@ data Statement = Skip
                | Statement:. Statement
                | While Expression Statement
                | If Expression Statement Statement
+  deriving (Eq)
 
 instance Show Statement where
   show = showStatement 0
@@ -419,6 +428,60 @@ checkedHistory3 = checkHistory testProgram3 [5]
               <-- "tmp" .= 8
               <-- "n" .= -1, [], reverse [1, 1, 2, 3, 5])
 
+
+
+type Parser st a = GenParser Char st a
+
+variable :: Parser st Expression
+variable = do
+  hd <- nameHead
+  tl <- nameTail
+  return (V (hd : tl))
+    where nameHead = satisfy $ (||) <$> isAlpha <*> (`elem` "_$")
+          nameTail = many $ nameHead <|> satisfy isDigit
+
+constant :: Parser st Expression
+constant = do
+  digits <- many1 $ satisfy isDigit
+  return (C (read digits))
+
+operatorTable :: [[Operator Char st Expression]]
+operatorTable = [ [postfix "++" inc, postfix "--" dec]
+                , binaryLeft [("*", (:*)), ("/", (:/)), ("%", (:%))]
+                , binaryLeft [("+", (:+)), ("-", (:-))]
+                , binaryNone [("<", (:<)), (">", (:>)), ("==", (:==)), ("!=", (:!=)), ("<=", (:<=)), (">=", (:>=))]
+                , [binary AssocRight "&&" (:&&)]
+                , [binary AssocRight "||" (:||)]
+                ]
+  where postfix literal op = Postfix (try (string literal) >> return op)
+        binary assoc literal op = Infix (try (string literal) >> return op) assoc
+        binaryLeft = map (uncurry (binary AssocLeft))
+        binaryNone = map (uncurry (binary AssocNone))
+
+term :: Parser st Expression
+term = variable
+   <|> constant
+   <|> (do char '('
+           expr <- expression
+           char ')'
+           return expr)
+   <?> "expression"
+
+expression :: Parser st Expression
+expression = buildExpressionParser operatorTable term
+
+parseExpression :: String -> Expression
+parseExpression input =
+  case parse expression "" (filter (not . isSpace) input) of
+    Right expr -> expr
+    Left message -> internalError ("Expression parsing error: " ++ show message)
+
+test1Parsing :: String
+test1Parsing = assert (parseExpression (show test1Expr) == test1Expr) "Parsing 1: OK"
+
+test2Parsing :: String
+test2Parsing = assert (parseExpression (show test2Expr) == test2Expr) "Parsing 2: OK"
+
 main :: IO ()
 main = do
   putStrLn test1Checked
@@ -430,3 +493,6 @@ main = do
   putStrLn checkedHistory2
   putStrLn ""
   putStrLn checkedHistory3
+  putStrLn ""
+  putStrLn test1Parsing
+  putStrLn test2Parsing

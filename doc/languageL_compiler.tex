@@ -1,0 +1,367 @@
+\documentclass{article}
+
+\usepackage{listings}
+\usepackage{indentfirst}
+\usepackage{verbatim}
+\usepackage{amsmath, amsthm, amssymb}
+\usepackage{stmaryrd}
+\usepackage{graphicx}
+\usepackage{euscript}
+
+\usepackage[utf8]{inputenc}
+\usepackage[english,russian]{babel}
+\usepackage[T2A]{fontenc}
+
+\lstdefinelanguage{llang}{
+keywords={skip, do, while, read, write, if, then, else},
+sensitive=true,
+%%basicstyle=\small,
+commentstyle=\scriptsize\rmfamily,
+keywordstyle=\ttfamily\underbar,
+identifierstyle=\ttfamily,
+basewidth={0.5em,0.5em},
+columns=fixed,
+fontadjust=true,
+literate={->}{{$\to$}}1
+}
+
+\lstset{
+language=llang
+}
+
+\newcommand{\aset}[1]{\left\{{#1}\right\}}
+\newcommand{\term}[1]{\mbox{\texttt{\bf{#1}}}}
+\newcommand{\cd}[1]{\mbox{\texttt{#1}}}
+\newcommand{\sembr}[1]{\llbracket{#1}\rrbracket}
+\newcommand{\conf}[1]{\left<{#1}\right>}
+\newcommand{\fancy}[1]{{\cal{#1}}}
+
+\newcommand{\trule}[2]{\frac{#1}{#2}}
+\newcommand{\crule}[3]{\frac{#1}{#2},\;{#3}}
+\newcommand{\withenv}[2]{{#1}\vdash{#2}}
+\newcommand{\trans}[3]{{#1}\xrightarrow{#2}{#3}}
+\newcommand{\ctrans}[4]{{#1}\xrightarrow{#2}{#3},\;{#4}}
+\newcommand{\llang}[1]{\mbox{\lstinline[mathescape]|#1|}}
+\newcommand{\pair}[2]{\inbr{{#1}\mid{#2}}}
+\newcommand{\inbr}[1]{\left<{#1}\right>}
+\newcommand{\highlight}[1]{\color{red}{#1}}
+\newcommand{\ruleno}[1]{\eqno[\textsc{#1}]}
+\newcommand{\inmath}[1]{\mbox{$#1$}}
+\newcommand{\lfp}[1]{fix_{#1}}
+\newcommand{\gfp}[1]{Fix_{#1}}
+\newcommand{\instr}[1]{\textsc{#1}}
+\newcommand{\norm}[1]{\left\lVert#1\right\rVert}
+\newcommand{\transexpr}[2]{{#1}\, \rightarrow_\fancy{E}\, {#2}}
+\newcommand{\transstmt}[3]{\withenv{#1}{{#2}\, \rightarrow_\fancy{S}\, {#3}}}
+
+\newcommand{\NN}{\mathbb N}
+\newcommand{\ZZ}{\mathbb Z}
+
+\begin{document}
+
+\section{Абстрактный синтаксис языка L}
+
+$$
+X \mbox{ --- счетно-бесконечное множество переменных}
+$$
+
+$$
+\otimes=\{\llang{+}, \llang{-}, \llang{*}, \llang{/}, \llang{\%}, \llang{==}, \llang{!=},
+\llang{>}, \llang{>=}, \llang{<}, \llang{<=}, \llang{\&\&}, \llang{||}\}
+$$
+
+\begin{itemize}
+\item Выражения: $\fancy{E}=X\cup\NN\cup(\fancy{E}\otimes\fancy{E})$
+\item Операторы:
+
+$$
+\begin{array}{rll}
+  \fancy{S}=&\llang{skip}&\cup\\
+            &X\;\llang{:=}\;\fancy{E}&\cup\\
+            &\fancy{S}\;\llang{;}\;\fancy{S}&\cup\\
+            &\llang{write}\;\fancy{E}&\cup\\
+            &\llang{read}\;\fancy{E}&\cup\\
+            &\llang{while}\;\fancy{E}\;\llang{do}\;\fancy{S}&\cup\\
+            &\llang{if}\;\fancy{E}\;\llang{then}\;\fancy{S}\;\llang{else}\;\fancy{S}
+\end{array}
+$$
+\item Программы: $\fancy{P}=\fancy{S}$
+\end{itemize}
+
+\section{Динамическая операционная\\
+семантика языка L}
+
+Состояния: $S=X\to\ZZ$ (частичная функция).
+
+Нигде не определенное состояние: $\perp$.
+
+Подстановка в состоянии:
+
+$$
+s[x\gets z]=\lambda y.\left\{
+                         \begin{array}{ll}
+                            z, & y = x \\
+                            s\; y, & \mbox{иначе}
+                         \end{array}
+                      \right.
+$$
+
+\begin{itemize}
+\item Семантика выражений: $\sembr{\cdot}:\fancy{E}\to(S\to\ZZ)$.
+
+\begin{enumerate}
+\item $\sembr{n}=\lambda s.n$, $n\in\NN$;
+\item $\sembr{x}=\lambda s.s\;x$, $x\in X$;
+\item $\sembr{A\otimes B}=\lambda s.\sembr{A}\;s\oplus\sembr{B}\;s$, где $\oplus$ ---
+соответствующая $\otimes$ арифметическая операция.
+\end{enumerate}
+
+\item Семантика операторов.
+
+Множество конфигураций: $C=S\times\ZZ^*\times\ZZ^*$.
+
+Правила перехода:
+
+$$
+\trans{c}{\llang{skip}}{c}\ruleno{Skip$_{bs}$}
+$$
+
+$$
+\trans{\inbr{s,i,o}}{\mbox{$x\llang{:=}e$}}{\inbr{s[x\gets\sembr{e}\;s],i,o}}\ruleno{Assign$_{bs}$}
+$$
+
+$$
+\trans{\inbr{s,zi,o}}{\mbox{$\llang{read}\;x$}}{\inbr{s[x\gets z],i,o}}\ruleno{Read$_{bs}$}
+$$
+
+$$
+\trans{\inbr{s,i,o}}{\mbox{$\llang{write}\;e$}}{\inbr{s,i,o(\sembr{e}\;s)}}\ruleno{Write$_{bs}$}
+$$
+
+$$
+\trule{\trans{c}{\mbox{$S_1$}}{c^\prime},\; \trans{c^\prime}{\mbox{$S_2$}}{c^{\prime\prime}}}
+      {\trans{c}{\mbox{$S_1\llang{;}S_2$}}{c^{\prime\prime}}}\ruleno{Seq$_{bs}$}
+$$
+
+$$
+\crule{\trans{c}{\mbox{$S_1$}}{c^\prime}}
+      {\trans{c}{\llang{if $\;e\;$ then $\;S_1\;$ else $\;S_2\;$}}{c^\prime}}
+      {\sembr{e}\;s\ne 0}\ruleno{If-True$_{bs}$}
+$$
+
+$$
+\crule{\trans{c}{\mbox{$S_2$}}{c^\prime}}
+      {\trans{c}{\llang{if $\;e\;$ then $\;S_1\;$ else $\;S_2\;$}}{c^\prime}}
+      {\sembr{e}\;s=0}\ruleno{If-False$_{bs}$}
+$$
+
+$$
+\crule{\trans{c}{\llang{$S$}}{c^\prime},\;\trans{c^\prime}{\llang{while $\;e\;$ do $\;S\;$}}{c^{\prime\prime}}}
+      {\trans{c}{\llang{while $\;e\;$ do $\;S\;$}}{c^{\prime\prime}}}
+      {\sembr{e}\;s\ne 0}\ruleno{While-True$_{bs}$}
+$$
+
+$$
+\ctrans{c}{\llang{while $\;e\;$ do $\;S\;$}}{c}{\sembr{e}\;s=0}\ruleno{While-False$_{bs}$}
+$$
+
+
+\item Семантика программы: $\sembr{\cdot}_P:\fancy{P}\to(\ZZ^*\to\ZZ^*)$.
+
+$\sembr{P}_P=\lambda i.o$, где $\trans{\inbr{\perp,i,\epsilon}}{\llang{$P$}}{\inbr{s,\epsilon,o}}$
+\end{itemize}
+
+
+\section{Стековая машина}
+
+\begin{itemize}
+  \item Инструкции:
+    $$
+    \fancy{I} = \{\, \instr{E},\, \instr{R},\, \instr{W}\, \}
+      \; \cup\; \instr{C}\, \NN
+      \; \cup\; \instr{L}\, X
+      \; \cup\; \instr{S}\, X
+      \; \cup\; \instr{B} \otimes
+      \; \cup\; \instr{J}\, \NN
+      \; \cup\; \instr{JT}\, \NN
+      \; \cup\; \instr{JF}\, \NN
+    $$
+
+  \item Программы для стековой машины:
+    $$
+    \fancy{T} = \epsilon\; \cup\; \fancy{I}\, \fancy{T}
+    $$
+
+  \item Длина программы:
+    $$\norm{\cdot} : \fancy{T} \to \NN$$
+    $$
+    \forall p \in \fancy{T}\; \norm{p} = \left\{
+      \begin{array}{ll}
+        0, & p = \epsilon \\
+        \norm{p'} + 1, & p = I\, p'
+      \end{array}
+    \right.
+    $$
+
+  \item Хвост программы по заданному смещению:
+    $$\cdot[\cdot] : \fancy{T} \times \NN \to \fancy{T}$$
+    $$
+    \forall p \in \fancy{T},\, l \in \NN\;\; p[l] = \left\{
+      \begin{array}{ll}
+        p, & l = 0 \\
+        p'[l - 1], & l > 0\; \land\; p = I\, p' \\
+        \mbox{не определено}, & l > 0\; \land\; p = \epsilon
+      \end{array}
+    \right.
+    $$
+
+  \item Множество конфигураций стековой машины:
+    $$
+    M = \ZZ^* \times (X \to \ZZ) \times \ZZ^* \times \ZZ^*
+    $$
+
+  \item Семантические правила для стековой машины
+    (здесь $P \in \fancy{T}$ --- неизменяемое окружение, представляющее собой полную программу для стековой машины,
+    $p \in \fancy{T}$ --- хвост программы, следующий за исполняющейся в текущий момент инструкцией):
+    $$
+    \withenv{P}{\trans{c}{\instr{E}\, p}{c}}
+    \ruleno{End}
+    $$
+    $$
+    \trule{\withenv{P}{\trans{\inbr{z s, m, i, o}}{p}{c'}}}
+          {\withenv{P}{\trans{\inbr{s, m, z i, o}}{\instr{R}\, p}{c'}}}
+    \ruleno{Read}
+    $$
+    $$
+    \trule{\withenv{P}{\trans{\inbr{s, m, i, o z}}{p}{c'}}}
+          {\withenv{P}{\trans{\inbr{z s, m, i, o}}{\instr{W}\, p}{c'}}}
+    \ruleno{Write}
+    $$
+    $$
+    \trule{\withenv{P}{\trans{\inbr{n s, m, i, o}}{p}{c'}}}
+          {\withenv{P}{\trans{\inbr{s, m, i, o}}{\instr{C} n\, p}{c'}}}
+    \ruleno{Const}
+    $$
+    $$
+    \trule{\withenv{P}{\trans{\inbr{(m x) s, m, i, o}}{p}{c'}}}
+          {\withenv{P}{\trans{\inbr{s, m, i, o}}{\instr{L} x\, p}{c'}}}
+    \ruleno{Load}
+    $$
+    $$
+    \trule{\withenv{P}{\trans{\inbr{s, m[x \gets z], i, o}}{p}{c'}}}
+          {\withenv{P}{\trans{\inbr{z s, m, i, o}}{\instr{S} x\, p}{c'}}}
+    \ruleno{Store}
+    $$
+    $$
+    \trule{\withenv{P}{\trans{\inbr{(a \oplus b) s, m, i, o}}{p}{c'}}}
+          {\withenv{P}{\trans{\inbr{b a s, m, i, o}}{\instr{B} \otimes\, p}{c'}}}
+    \ruleno{BinOp}
+    $$
+    $$
+    \trule{\withenv{P}{\trans{c}{P[l]}{c'}}}
+          {\withenv{P}{\trans{c}{\instr{J} l\, p}{c'}}}
+    \ruleno{Jump}
+    $$
+    $$
+    \trule{\withenv{P}{\trans{\inbr{s, m, i, o}}{P[l]}{c'}}}
+          {\withenv{P}{\trans{\inbr{1 s, m, i, o}}{\instr{JT} l\, p}{c'}}}
+    \ruleno{JT-Jump}
+    $$
+    $$
+    \trule{\withenv{P}{\trans{\inbr{s, m, i, o}}{p}{c'}}}
+          {\withenv{P}{\trans{\inbr{0 s, m, i, o}}{\instr{JT} l\, p}{c'}}}
+    \ruleno{JT-Skip}
+    $$
+    $$
+    \trule{\withenv{P}{\trans{\inbr{s, m, i, o}}{P[l]}{c'}}}
+          {\withenv{P}{\trans{\inbr{0 s, m, i, o}}{\instr{JF} l\, p}{c'}}}
+    \ruleno{JF-Jump}
+    $$
+    $$
+    \trule{\withenv{P}{\trans{\inbr{s, m, i, o}}{p}{c'}}}
+          {\withenv{P}{\trans{\inbr{1 s, m, i, o}}{\instr{JF} l\, p}{c'}}}
+    \ruleno{JF-Skip}
+    $$
+
+  \item Семантика программ для стековой машины: \\*
+    $\forall T \in \fancy{T}\;\; \sembr{T}_M = \lambda i.o$, где
+    $\withenv{T}{\trans{\inbr{\epsilon, \perp, i, \epsilon}}{T}{\inbr{s, m, \epsilon, o}}}$
+\end{itemize}
+
+\section{Компилятор}
+\subsection{Трансляция выражений}
+Определим функциональное отношение
+$$
+\transexpr{\cdot}{\cdot}\; \in\, \fancy{E} \times \fancy{T}
+$$
+следующим образом:
+$$
+\forall x \in X\;\; \transexpr{x}{\instr{L}\, x}\ruleno{Var$_c$}
+$$
+$$
+\forall n \in \NN\;\; \transexpr{n}{\instr{C}\, n}\ruleno{Const$_c$}
+$$
+$$
+\trule{\transexpr{A}{A'},\; \transexpr{B}{B'}}
+      {\transexpr{A \otimes B}{A'\; B'\; \instr{B} \otimes}}
+\ruleno{BinOp$_c$}
+$$
+
+\subsection{Трансляция операторов}
+Определим функциональное отношение
+$$
+\transstmt{\NN}{\cdot}{\cdot}\; \in\, \fancy{S} \times \fancy{T}
+$$
+с изменяемым окружением $n \in \NN$, обозначающим размер уже сгенерированной программы,
+следущим образом:
+$$
+\transstmt{n}{\llang{skip}}{\epsilon}\ruleno{Skip$_c$}
+$$
+$$
+\trule{\transexpr{e}{e'}}
+      {\transstmt{n}{x\, \llang{:=}\, e}{e'\; \instr{S}\, x}}
+\ruleno{Assign$_c$}
+$$
+$$
+\transstmt{n}{\llang{read}(x)}{\instr{R}\; \instr{S}\, x}
+\ruleno{Read$_c$}
+$$
+$$
+\trule{\transexpr{e}{e'}}
+      {\transstmt{n}{\llang{write}(e)}{e'\; \instr{W}}}
+\ruleno{Write$_c$}
+$$
+$$
+\trule{\transstmt{n}{S_1}{S_1'},\;\; \transstmt{(n + \norm{S_1'})}{S_2}{S_2'}}
+      {\transstmt{n}{S_1\; \llang{;}\; S_2}{S_1'\; S_2'}}
+\ruleno{Seq$_c$}
+$$
+$$
+\crule{\transexpr{e}{e'},\;\; \transstmt{l}{S}{S'}}
+{\transstmt{n}{\llang{while}\; e\; \llang{do}\; S_1}{\instr{J}\, l_0\; S'\; e'\; \instr{JT}\, l}}
+      {\begin{array}{l}
+        l = n + 1 \\
+        l_0 = l + \norm{S'}
+      \end{array}}
+\ruleno{While$_c$}
+$$
+$$
+\crule{\transexpr{e}{e'},\;\; \transstmt{f}{S_1}{S_1'},\;\; \transstmt{l_1}{S_2}{S_2'}}
+      {\transstmt{n}{\llang{if}\; e\; \llang{then}\; S_1\; \llang{else}\; S_2}{e'\; \instr{JF}\, l_1\; S_1'\; \instr{J}\, l_2\; S_2'}}
+      {\begin{array}{l}
+        f = n + \norm{e'} + 1 \\
+        l_1 = f + \norm{S_1'} + 1 \\
+        l_2 = l_1 + \norm{S_2'}
+      \end{array}}
+\ruleno{If$_c$}
+$$
+
+\subsection{Трансляция программы на языке L}
+$$
+compile : \fancy{P} \to \fancy{T}
+$$
+$$
+\forall P \in \fancy{P}\;\; \transstmt{0}{P}{T} \implies compile(P) = T\,\instr{E}
+$$
+
+\end{document}

@@ -245,6 +245,7 @@ showProgram = unlines . map ("| " ++) . lines . show
 
 type Stream = [Integer]
 type Configuration = (State, Stream, Stream)
+type ProgramSema = Statement -> Stream -> Stream
 
 emptyInputStreamMessage :: String
 emptyInputStreamMessage = "Can not read from an empty input stream"
@@ -285,7 +286,7 @@ bigStep _ _ = programError emptyInputStreamMessage
 initialConf :: Stream -> Configuration
 initialConf input = (emptyState, input, [])
 
-programSema :: Statement -> Stream -> Stream
+programSema :: ProgramSema
 programSema statement input = case bigStep statement (initialConf input) of
                                 (s, [], output) -> forseState s $ reverse output
                                 _ -> programError nonEmptyInputStreamMessage
@@ -379,13 +380,13 @@ test2Expected = 1
 test2Checked = checkExpression test2Expr test2Env test2Expected
 
 
-checkProgram :: Statement -> Stream -> Stream -> String
-checkProgram program input expected = assert (actual == expected) $
+checkProgram :: ProgramSema -> Statement -> Stream -> Stream -> String
+checkProgram pSema program input expected = assert (actual == expected) $
   "The program below has completed execution on an input stream " ++ showStream input ++
   " with output stream " ++ showStream actual ++
   " while expected output is " ++ showStream expected ++ ".\n" ++
   showProgram program ++ "\n"
-    where actual = programSema program input
+    where actual = pSema program input
           showStream = intercalate " " . map show
 
 checkHistory :: Statement -> Stream -> Configuration -> String
@@ -429,7 +430,7 @@ testProgram3 =
     "curr" ::= V "tmp")
 
 checkedProgram1 :: String
-checkedProgram1 = checkProgram testProgram1 [6] [720]
+checkedProgram1 = checkProgram programSema testProgram1 [6] [720]
 
 checkedHistory1 :: String
 checkedHistory1 = checkHistory testProgram1 [2]
@@ -588,7 +589,7 @@ runMachine _ [] _ = stackMachineError "Unexpected end of program"
 
 
 machineSema :: SMProgram -> Stream -> Stream
-machineSema instrs i | (_, _, [], o) <- runMachine instrs instrs ([], emptyState, i, []) = o
+machineSema instrs i | (_, _, [], o) <- runMachine instrs instrs ([], emptyState, i, []) = reverse o
                      | otherwise = stackMachineError nonEmptyInputStreamMessage
 
 
@@ -614,7 +615,7 @@ testMachineInput :: Integer
 testMachineInput = 20
 
 testMachineExpected :: Stream
-testMachineExpected = [1 .. testMachineInput]
+testMachineExpected = reverse [1 .. testMachineInput]
 
 testMachineActual :: Stream
 testMachineActual = machineSema testMachineInstrs [testMachineInput]
@@ -666,6 +667,44 @@ testMachineExpressionValue2 =
   assert (machineExpressionValue test2Env test2Expr == test2Expected) "testMachineExpressionValue2: OK"
 
 
+compileStatement :: Addr -> Statement -> SMProgram
+compileStatement _ Skip = []
+compileStatement _ (x ::= e) = compileExpression e ++ [S x]
+compileStatement _ (Read x) = [R, S x]
+compileStatement _ (Write e) = compileExpression e ++ [W]
+
+compileStatement n (st1:. st2) = let st1' = compileStatement n st1
+                                     st2' = compileStatement (n + length st1') st2
+                                 in  st1' ++ st2'
+
+compileStatement n (While e st) = let l = n + 1
+                                      st' = compileStatement l st
+                                      l0 = l + length st'
+                                  in  [J l0] ++ st' ++ compileExpression e ++ [JT l]
+
+compileStatement n (If e st1 st2) = let e' = compileExpression e
+                                        f = n + length e' + 1
+                                        st1' = compileStatement f st1
+                                        l1 = f + length st1' + 1
+                                        st2' = compileStatement l1 st2
+                                        l2 = l1 + length st2'
+                                    in  e' ++ [JF l1] ++ st1' ++ [J l2] ++ st2'
+
+
+compileProgram :: Statement -> SMProgram
+compileProgram program = compileStatement 0 program ++ [E]
+
+
+compiledProgramSema :: Statement -> Stream -> Stream
+compiledProgramSema = machineSema . compileProgram
+
+
+
+checkedCompiledProgram1 = checkProgram compiledProgramSema testProgram1 [6] [720]
+checkedCompiledProgram2 = checkProgram compiledProgramSema testProgram2 [75600, 12375] [225]
+checkedCompiledProgram3 = checkProgram compiledProgramSema testProgram3 [10] [1, 1, 2, 3, 5, 8, 13, 21, 34, 55]
+
+
 
 main :: IO ()
 main = do
@@ -685,3 +724,7 @@ main = do
   putStrLn testMachineChecked
   putStrLn testMachineExpressionValue1
   putStrLn testMachineExpressionValue2
+  putStrLn ""
+  putStrLn checkedCompiledProgram1
+  putStrLn checkedCompiledProgram2
+  putStrLn checkedCompiledProgram3

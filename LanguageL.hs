@@ -517,13 +517,40 @@ data Instruction = E                  -- End
                  | J Addr             -- Jump
                  | JT Addr            -- Jump If True
                  | JF Addr            -- Jump If False
-  deriving (Show, Read, Eq)
-
 
 data BinaryOperator = Add | Sub | Mul | Div | Mod
                     | Lt | Gt | Eq | Neq | Le | Ge
                     | Disj | Conj
-  deriving (Show, Read, Eq)
+
+instance Show BinaryOperator where
+  show Add = "+"
+  show Sub = "-"
+  show Mul = "*"
+  show Div = "/"
+  show Mod = "%"
+
+  show Lt = "<"
+  show Gt = ">"
+  show Eq = "=="
+  show Neq = "!="
+  show Le = "<="
+  show Ge = ">="
+
+  show Disj = "||"
+  show Conj = "&&"
+
+instance Show Instruction where
+  show E = "End"
+  show R = "Read"
+  show W = "Write"
+  show (I n) = "Const " ++ show n
+  show (L x) = "Load " ++ x
+  show (S x) = "Store " ++ x
+  show (B op) = "( " ++ show op ++ " )"
+  show (J addr) = "Jump :" ++ show addr
+  show (JT addr) = "JumpIf1 :" ++ show addr
+  show (JF addr) = "JumpIf0 :" ++ show addr
+
 
 binOperation :: BinaryOperator -> (Integer -> Integer -> Integer)
 binOperation Add = (+)
@@ -543,11 +570,11 @@ binOperation Disj = fromBoolOperation disjOperation
 binOperation Conj = fromBoolOperation conjOperation
 
 
-type SMProgram = [Instruction]
+type SMInstructions = [Instruction]
 type Stack = [Integer]
 type SMConfiguration = (Stack, State, Stream, Stream)
 
-goto :: SMProgram -> Addr -> SMProgram
+goto :: SMInstructions -> Addr -> SMInstructions
 goto program addr | addr > length program = stackMachineError ("Can not jump to instruction with address "
                                                             ++ show addr ++ ", the program have "
                                                             ++ show (length program) ++ " instructions only")
@@ -557,7 +584,7 @@ goto program addr | addr > length program = stackMachineError ("Can not jump to 
 stackUnderflowMessage :: String -> String
 stackUnderflowMessage instructionInfo = "Stack Underflow (" ++ instructionInfo ++ ")"
 
-runMachine :: SMProgram -> SMProgram -> SMConfiguration -> SMConfiguration
+runMachine :: SMInstructions -> SMInstructions -> SMConfiguration -> SMConfiguration
 runMachine _ (E : _) conf = conf
 
 runMachine program (R : instrs) (s, m, z : i, o) = runMachine program instrs (z : s, m, i, o)
@@ -588,12 +615,12 @@ runMachine program (JF _ : _) ([], _, _, _) = stackMachineError (stackUnderflowM
 runMachine _ [] _ = stackMachineError "Unexpected end of program"
 
 
-machineSema :: SMProgram -> Stream -> Stream
+machineSema :: SMInstructions -> Stream -> Stream
 machineSema instrs i | (_, _, [], o) <- runMachine instrs instrs ([], emptyState, i, []) = reverse o
                      | otherwise = stackMachineError nonEmptyInputStreamMessage
 
 
-testMachineInstrs :: SMProgram
+testMachineInstrs :: SMInstructions
 testMachineInstrs =
   [ R      --  0
   , S "i"  --  1
@@ -624,10 +651,10 @@ testMachineChecked :: String
 testMachineChecked = assert (testMachineActual == testMachineExpected) "testMachine: OK"
 
 
-compileBinOp :: BinaryOperator -> Expression -> Expression -> SMProgram
+compileBinOp :: BinaryOperator -> Expression -> Expression -> SMInstructions
 compileBinOp op e1 e2 = compileExpression e1 ++ compileExpression e2 ++ [B op]
 
-compileExpression :: Expression -> SMProgram
+compileExpression :: Expression -> SMInstructions
 compileExpression (V x) = [L x]
 compileExpression (C n) = [I n]
 
@@ -651,7 +678,7 @@ compileExpression (e1 :|| e2) = compileBinOp Disj e1 e2
 compileExpression (e1 :&& e2) = compileBinOp Conj e1 e2
 
 
-compileEnv :: [(VarName, Integer)] -> SMProgram
+compileEnv :: [(VarName, Integer)] -> SMInstructions
 compileEnv = concatMap (\(x, n) -> [I n, S x])
 
 machineExpressionValue :: [(VarName, Integer)] -> Expression -> Integer
@@ -667,7 +694,7 @@ testMachineExpressionValue2 =
   assert (machineExpressionValue test2Env test2Expr == test2Expected) "testMachineExpressionValue2: OK"
 
 
-compileStatement :: Addr -> Statement -> SMProgram
+compileStatement :: Addr -> Statement -> SMInstructions
 compileStatement _ Skip = []
 compileStatement _ (x ::= e) = compileExpression e ++ [S x]
 compileStatement _ (Read x) = [R, S x]
@@ -691,12 +718,21 @@ compileStatement n (If e st1 st2) = let e' = compileExpression e
                                     in  e' ++ [JF l1] ++ st1' ++ [J l2] ++ st2'
 
 
+newtype SMProgram = SMProgram { getInstructions :: SMInstructions }
+
+instance Show SMProgram where
+  show (SMProgram instructions) = concatMap showLine $ zip [0..] instructions
+    where showLine (addr, instr) = replicate (maxLen - length addr') ' ' ++ addr' ++ ":   " ++ show instr ++ "\n"
+            where addr' = show addr
+          maxLen = length (show (length instructions - 1))
+
+
 compileProgram :: Statement -> SMProgram
-compileProgram program = compileStatement 0 program ++ [E]
+compileProgram program = SMProgram $ compileStatement 0 program ++ [E]
 
 
 compiledProgramSema :: Statement -> Stream -> Stream
-compiledProgramSema = machineSema . compileProgram
+compiledProgramSema = machineSema . getInstructions . compileProgram
 
 
 
@@ -726,5 +762,8 @@ main = do
   putStrLn testMachineExpressionValue2
   putStrLn ""
   putStrLn checkedCompiledProgram1
+  putStrLn ("Compiler Output:\n" ++ show (compileProgram testProgram1) ++ "\n")
   putStrLn checkedCompiledProgram2
+  putStrLn ("Compiler Output:\n" ++ show (compileProgram testProgram2) ++ "\n")
   putStrLn checkedCompiledProgram3
+  putStrLn ("Compiler Output:\n" ++ show (compileProgram testProgram3) ++ "\n")

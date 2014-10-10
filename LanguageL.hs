@@ -623,6 +623,50 @@ testMachineChecked :: String
 testMachineChecked = assert (testMachineActual == testMachineExpected) "testMachine: OK"
 
 
+compileBinOp :: BinaryOperator -> Expression -> Expression -> SMProgram
+compileBinOp op e1 e2 = compileExpression e1 ++ compileExpression e2 ++ [B op]
+
+compileExpression :: Expression -> SMProgram
+compileExpression (V x) = [L x]
+compileExpression (C n) = [I n]
+
+compileExpression (Inc x) = [L x, L x, I 1, B Add, S x]
+compileExpression (Dec x) = [L x, L x, I 1, B Sub, S x]
+
+compileExpression (e1 :+ e2) = compileBinOp Add e1 e2
+compileExpression (e1 :* e2) = compileBinOp Mul e1 e2
+compileExpression (e1 :- e2) = compileBinOp Sub e1 e2
+compileExpression (e1 :/ e2) = compileBinOp Div e1 e2
+compileExpression (e1 :% e2) = compileBinOp Mod e1 e2
+
+compileExpression (e1 :< e2) = compileBinOp Lt e1 e2
+compileExpression (e1 :> e2) = compileBinOp Gt e1 e2
+compileExpression (e1 :== e2) = compileBinOp Eq e1 e2
+compileExpression (e1 :!= e2) = compileBinOp Neq e1 e2
+compileExpression (e1 :<= e2) = compileBinOp Le e1 e2
+compileExpression (e1 :>= e2) = compileBinOp Ge e1 e2
+
+compileExpression (e1 :|| e2) = compileBinOp Disj e1 e2
+compileExpression (e1 :&& e2) = compileBinOp Conj e1 e2
+
+
+compileEnv :: [(VarName, Integer)] -> SMProgram
+compileEnv = concatMap (\(x, n) -> [I n, S x])
+
+machineExpressionValue :: [(VarName, Integer)] -> Expression -> Integer
+machineExpressionValue env e | ([value], _, [], []) <- runMachine instrs instrs ([], emptyState, [], []) = value
+                             | otherwise = stackMachineError "machineExpressionValue"
+  where instrs = compileEnv env ++ compileExpression e ++ [E]
+
+
+testMachineExpressionValue1 =
+  assert (machineExpressionValue test1Env test1Expr == test1Expected) "testMachineExpressionValue1: OK"
+
+testMachineExpressionValue2 =
+  assert (machineExpressionValue test2Env test2Expr == test2Expected) "testMachineExpressionValue2: OK"
+
+
+
 main :: IO ()
 main = do
   putStrLn test1Checked
@@ -639,3 +683,5 @@ main = do
   putStrLn test2Parsing
   putStrLn ""
   putStrLn testMachineChecked
+  putStrLn testMachineExpressionValue1
+  putStrLn testMachineExpressionValue2

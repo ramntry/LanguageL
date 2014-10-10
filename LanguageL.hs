@@ -18,6 +18,7 @@ languageLError message = error ("[Language L] " ++ message ++ ".")
 internalError message = languageLError ("Internal Error: " ++ message)
 expressionError message = languageLError ("Expression Evaluation: " ++ message)
 programError message = languageLError ("Program Execution: " ++ message)
+stackMachineError message = languageLError ("Stack Machine Operation: " ++ message)
 
 type VarName = String
 
@@ -154,6 +155,20 @@ fromBool :: Bool -> Integer
 fromBool False = 0
 fromBool True = 1
 
+fromBoolOperation :: (Integer -> Integer -> Bool) -> (Integer -> Integer -> Integer)
+fromBoolOperation op = \n m -> fromBool (n `op` m)
+
+divOperation :: Integer -> Integer -> Integer
+divOperation = \n m -> n `div` divisor m
+
+modOperation :: Integer -> Integer -> Integer
+modOperation = \n m -> n `mod` divisor m
+
+disjOperation :: Integer -> Integer -> Bool
+disjOperation = (||) `on` bool expressionError
+
+conjOperation :: Integer -> Integer -> Bool
+conjOperation = (&&) `on` bool expressionError
 
 semaForBinOp :: (Integer -> Integer -> Integer) -> Expression -> Expression -> Semantics
 semaForBinOp op e1 e2 = \s -> let (a1, s1) = sema e1 s
@@ -161,7 +176,7 @@ semaForBinOp op e1 e2 = \s -> let (a1, s1) = sema e1 s
                               in  (a1 `op` a2, s2)
 
 semaForBoolOp :: (Integer -> Integer -> Bool) -> Expression -> Expression -> Semantics
-semaForBoolOp op = semaForBinOp (\n m -> fromBool (n `op` m))
+semaForBoolOp op = semaForBinOp (fromBoolOperation op)
 
 sema :: Expression -> Semantics
 sema (C n) = \s -> (n, s)
@@ -173,8 +188,8 @@ sema (Dec x) = \s -> (s.$ x, s <-- x .= s.$ x - 1)
 sema (e1 :+ e2) = semaForBinOp (+) e1 e2
 sema (e1 :* e2) = semaForBinOp (*) e1 e2
 sema (e1 :- e2) = semaForBinOp (-) e1 e2
-sema (e1 :/ e2) = semaForBinOp (\n m -> n `div` divisor m) e1 e2
-sema (e1 :% e2) = semaForBinOp (\n m -> n `mod` divisor m) e1 e2
+sema (e1 :/ e2) = semaForBinOp divOperation e1 e2
+sema (e1 :% e2) = semaForBinOp modOperation e1 e2
 
 sema (e1 :< e2) = semaForBoolOp (<) e1 e2
 sema (e1 :> e2) = semaForBoolOp (>) e1 e2
@@ -183,8 +198,8 @@ sema (e1 :!= e2) = semaForBoolOp (/=) e1 e2
 sema (e1 :<= e2) = semaForBoolOp (<=) e1 e2
 sema (e1 :>= e2) = semaForBoolOp (>=) e1 e2
 
-sema (e1 :|| e2) = semaForBoolOp ((||) `on` bool expressionError) e1 e2
-sema (e1 :&& e2) = semaForBoolOp ((&&) `on` bool expressionError) e1 e2
+sema (e1 :|| e2) = semaForBoolOp disjOperation e1 e2
+sema (e1 :&& e2) = semaForBoolOp conjOperation e1 e2
 
 
 eval :: [(VarName, Integer)] -> Expression -> Integer
@@ -231,6 +246,12 @@ showProgram = unlines . map ("| " ++) . lines . show
 type Stream = [Integer]
 type Configuration = (State, Stream, Stream)
 
+emptyInputStreamMessage :: String
+emptyInputStreamMessage = "Can not read from an empty input stream"
+
+nonEmptyInputStreamMessage :: String
+nonEmptyInputStreamMessage = "Program has completed with non-empty input stream"
+
 bigStep :: Statement -> Configuration -> Configuration
 bigStep Skip conf = conf
 
@@ -258,7 +279,7 @@ bigStep (If e st1 st2) (s, i, o) =
       then bigStep st1 (s1, i, o)
       else bigStep st2 (s1, i, o)
 
-bigStep _ _ = programError "Can not read from an empty input stream"
+bigStep _ _ = programError emptyInputStreamMessage
 
 
 initialConf :: Stream -> Configuration
@@ -267,7 +288,7 @@ initialConf input = (emptyState, input, [])
 programSema :: Statement -> Stream -> Stream
 programSema statement input = case bigStep statement (initialConf input) of
                                 (s, [], output) -> forseState s $ reverse output
-                                _ -> programError "Program has completed with non-empty input stream"
+                                _ -> programError nonEmptyInputStreamMessage
   where forseState = seq . length . show
 
 
@@ -482,6 +503,126 @@ test1Parsing = assert (parseExpression (show test1Expr) == test1Expr) "Parsing 1
 test2Parsing :: String
 test2Parsing = assert (parseExpression (show test2Expr) == test2Expr) "Parsing 2: OK"
 
+
+type Addr = Int
+
+data Instruction = E                  -- End
+                 | R                  -- Read
+                 | W                  -- Write
+                 | I Integer          -- Const (Immediate)
+                 | L VarName          -- Load
+                 | S VarName          -- Store
+                 | B BinaryOperator   -- BinOp
+                 | J Addr             -- Jump
+                 | JT Addr            -- Jump If True
+                 | JF Addr            -- Jump If False
+  deriving (Show, Read, Eq)
+
+
+data BinaryOperator = Add | Sub | Mul | Div | Mod
+                    | Lt | Gt | Eq | Neq | Le | Ge
+                    | Disj | Conj
+  deriving (Show, Read, Eq)
+
+binOperation :: BinaryOperator -> (Integer -> Integer -> Integer)
+binOperation Add = (+)
+binOperation Sub = (-)
+binOperation Mul = (*)
+binOperation Div = divOperation
+binOperation Mod = modOperation
+
+binOperation Lt = fromBoolOperation (<)
+binOperation Gt = fromBoolOperation (>)
+binOperation Eq = fromBoolOperation (==)
+binOperation Neq = fromBoolOperation (/=)
+binOperation Le = fromBoolOperation (<=)
+binOperation Ge = fromBoolOperation (>=)
+
+binOperation Disj = fromBoolOperation disjOperation
+binOperation Conj = fromBoolOperation conjOperation
+
+
+type SMProgram = [Instruction]
+type Stack = [Integer]
+type SMConfiguration = (Stack, State, Stream, Stream)
+
+goto :: SMProgram -> Addr -> SMProgram
+goto program addr | addr > length program = stackMachineError ("Can not jump to instruction with address "
+                                                            ++ show addr ++ ", the program have "
+                                                            ++ show (length program) ++ " instructions only")
+                  | otherwise = drop addr program
+
+
+stackUnderflowMessage :: String -> String
+stackUnderflowMessage instructionInfo = "Stack Underflow (" ++ instructionInfo ++ ")"
+
+runMachine :: SMProgram -> SMProgram -> SMConfiguration -> SMConfiguration
+runMachine _ (E : _) conf = conf
+
+runMachine program (R : instrs) (s, m, z : i, o) = runMachine program instrs (z : s, m, i, o)
+runMachine _ (R : _) (_, _, [], _) = stackMachineError emptyInputStreamMessage
+
+runMachine program (W : instrs) (z : s, m, i, o) = runMachine program instrs (s, m, i, z : o)
+runMachine _ (W : _) ([], _, _, _) = stackMachineError (stackUnderflowMessage "Write")
+
+runMachine program (I n : instrs) (s, m, i, o) = runMachine program instrs (n : s, m, i, o)
+runMachine program (L x : instrs) (s, m, i, o) = runMachine program instrs ((m.$ x) : s, m, i, o)
+
+runMachine program (S x : instrs) (z : s, m, i, o) = runMachine program instrs (s, m <-- x .= z, i, o)
+runMachine _ (S x : _) ([], _, _, _) = stackMachineError (stackUnderflowMessage $ "Store " ++ x)
+
+runMachine program (B op : instrs) (b : a : s, m, i, o) = runMachine program instrs (binOperation op a b : s, m, i, o)
+runMachine _ (B op : _) _ = stackMachineError (stackUnderflowMessage $ "BinOp " ++ show op)
+
+runMachine program (J addr : _) conf = runMachine program (program `goto` addr) conf
+
+runMachine program (JT addr : _) (1 : s, m, i, o) = runMachine program (program `goto` addr) (s, m, i, o)
+runMachine program (JT _ : instrs) (0 : s, m, i, o) = runMachine program instrs (s, m, i, o)
+runMachine program (JT _ : _) ([], _, _, _) = stackMachineError (stackUnderflowMessage "Jump If True")
+
+runMachine program (JF addr : _) (0 : s, m, i, o) = runMachine program (program `goto` addr) (s, m, i, o)
+runMachine program (JF _ : instrs) (1 : s, m, i, o) = runMachine program instrs (s, m, i, o)
+runMachine program (JF _ : _) ([], _, _, _) = stackMachineError (stackUnderflowMessage "Jump If False")
+
+runMachine _ [] _ = stackMachineError "Unexpected end of program"
+
+
+machineSema :: SMProgram -> Stream -> Stream
+machineSema instrs i | (_, _, [], o) <- runMachine instrs instrs ([], emptyState, i, []) = o
+                     | otherwise = stackMachineError nonEmptyInputStreamMessage
+
+
+testMachineInstrs :: SMProgram
+testMachineInstrs =
+  [ R      --  0
+  , S "i"  --  1
+  , J 9    --  2
+  , L "i"  --  3
+  , W      --  4
+  , L "i"  --  5
+  , I 1    --  6
+  , B Sub  --  7
+  , S "i"  --  8
+  , I 0    --  9
+  , L "i"  -- 10
+  , B Lt   -- 11
+  , JT 3   -- 12
+  , E      -- 13
+  ]
+
+testMachineInput :: Integer
+testMachineInput = 20
+
+testMachineExpected :: Stream
+testMachineExpected = [1 .. testMachineInput]
+
+testMachineActual :: Stream
+testMachineActual = machineSema testMachineInstrs [testMachineInput]
+
+testMachineChecked :: String
+testMachineChecked = assert (testMachineActual == testMachineExpected) "testMachine: OK"
+
+
 main :: IO ()
 main = do
   putStrLn test1Checked
@@ -496,3 +637,5 @@ main = do
   putStrLn ""
   putStrLn test1Parsing
   putStrLn test2Parsing
+  putStrLn ""
+  putStrLn testMachineChecked

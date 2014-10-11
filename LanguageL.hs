@@ -1091,15 +1091,15 @@ main = do
   putStrLn ""
   putStrLn checkedCompiledProgram1
   putStrLn ("Compiler Output:\n" ++ show (compileProgram testProgram1))
-  prettyCheckOfBinaryProgram "program1" testProgram1 [8] [40320]
   putStrLn "\n"
   putStrLn checkedCompiledProgram2
   putStrLn ("Compiler Output:\n" ++ show (compileProgram testProgram2))
-  prettyCheckOfBinaryProgram "program2" testProgram2 [832040, 1346269] [1]
   putStrLn "\n"
   putStrLn checkedCompiledProgram3
   putStrLn ("Compiler Output:\n" ++ show (compileProgram testProgram3))
-  prettyCheckOfBinaryProgram "program3" testProgram3 [12] [1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144]
   putStrLn "\n"
+  prettyCheckOfBinaryProgram "program1" testProgram1 [8] [40320]
+  prettyCheckOfBinaryProgram "program2" testProgram2 [832040, 1346269] [1]
+  prettyCheckOfBinaryProgram "program3" testProgram3 [12] [1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144]
   prettyCheckOfBinaryProgram "program4" testProgram4 [] [1]
   prettyCheckOfBinaryProgram "program5" testProgram5 [] [1]

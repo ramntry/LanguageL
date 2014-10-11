@@ -2,7 +2,8 @@ module Main where
 
 import Control.Exception.Base (assert)
 import Data.Function (on)
-import Data.List (intercalate)
+import Data.Maybe (mapMaybe)
+import Data.List (intercalate, nub)
 import qualified Data.Map as Map
 
 import Text.ParserCombinators.Parsec (GenParser, (<|>), (<?>), satisfy, many, parse, char, string, try)
@@ -10,6 +11,12 @@ import Text.ParserCombinators.Parsec.Combinator (many1)
 import Text.ParserCombinators.Parsec.Expr (Operator (..), Assoc (..), buildExpressionParser)
 import Data.Char (isAlpha, isDigit, isSpace)
 import Control.Applicative ((<$>), (<*>))
+
+import System.IO (writeFile)
+import System.Directory (doesFileExist)
+import System.Cmd (rawSystem)
+import System.Exit (ExitCode (ExitSuccess))
+import System.Process (readProcess)
 
 
 type ErrorHandler a = String -> a
@@ -19,6 +26,7 @@ internalError message = languageLError ("Internal Error: " ++ message)
 expressionError message = languageLError ("Expression Evaluation: " ++ message)
 programError message = languageLError ("Program Execution: " ++ message)
 stackMachineError message = languageLError ("Stack Machine Operation: " ++ message)
+x86InternalError message = languageLError ("Native Compiler Internal Error: " ++ message)
 
 type VarName = String
 
@@ -429,6 +437,11 @@ testProgram3 =
     "next" ::= V "curr" :+ V "next":.
     "curr" ::= V "tmp")
 
+checkProgramOfExpression :: [(VarName, Integer)] -> Expression -> Integer -> Statement
+checkProgramOfExpression env expr expected =
+  foldr (\(x, n) acc -> x ::= C n:. acc) (Write (expr :== C expected)) env
+
+
 checkedProgram1 :: String
 checkedProgram1 = checkProgram programSema testProgram1 [6] [720]
 
@@ -720,9 +733,15 @@ compileStatement n (If e st1 st2) = let e' = compileExpression e
 
 newtype SMProgram = SMProgram { getInstructions :: SMInstructions }
 
+ljust :: Int -> String -> String
+ljust width string = string ++ replicate (width - length string) ' '
+
+rjust :: Int -> String -> String
+rjust width string = replicate (width - length string) ' ' ++ string
+
 instance Show SMProgram where
   show (SMProgram instructions) = concatMap showLine $ zip [0..] instructions
-    where showLine (addr, instr) = replicate (maxLen - length addr') ' ' ++ addr' ++ ":   " ++ show instr ++ "\n"
+    where showLine (addr, instr) = rjust maxLen addr' ++ ":   " ++ show instr ++ "\n"
             where addr' = show addr
           maxLen = length (show (length instructions - 1))
 
@@ -739,6 +758,315 @@ compiledProgramSema = machineSema . getInstructions . compileProgram
 checkedCompiledProgram1 = checkProgram compiledProgramSema testProgram1 [6] [720]
 checkedCompiledProgram2 = checkProgram compiledProgramSema testProgram2 [75600, 12375] [225]
 checkedCompiledProgram3 = checkProgram compiledProgramSema testProgram3 [10] [1, 1, 2, 3, 5, 8, 13, 21, 34, 55]
+
+
+
+type Symbol = String
+
+data X86Reg = Rax | Rcx | Rbx | Rdx | Rdi | Rsp | Rbl
+
+data X86Operand = Register X86Reg
+                | Symbol Symbol
+                | Immediate Int
+                | Indirect X86Reg
+
+data X86Label = Local Addr
+              | Global Symbol
+
+data X86Condition = IfE
+                  | IfNe
+                  | IfZ
+                  | IfNz
+                  | IfL
+                  | IfG
+                  | IfLe
+                  | IfGe
+
+
+data X86Instruction = Xor X86Operand X86Operand
+                    | Or X86Operand X86Operand
+                    | And X86Operand X86Operand
+                    | XAdd X86Operand X86Operand
+                    | XSub X86Operand X86Operand
+                    | IMul X86Operand
+                    | Cqo
+                    | Idiv X86Operand
+                    | Mov X86Operand X86Operand
+                    | Cmp X86Operand X86Operand
+                    | SetCond X86Condition X86Operand
+                    | JmpCond X86Condition X86Label
+                    | Jmp X86Label
+                    | Call X86Operand
+                    | Push X86Operand
+                    | Pop X86Operand
+
+
+newtype X86Line = X86Line (Maybe X86Label, X86Instruction)
+
+instance Show X86Line where
+  show (X86Line (label, instr)) = showAsmLine labelWidth x86InstructionIndent label (Just (show instr))
+
+
+setLabel :: X86Label -> [X86Instruction] -> [X86Line]
+setLabel _ [] = x86InternalError "Can not label an empty set of x86 instructions"
+setLabel label (i : is) = X86Line (Just label, i) : map (\instr -> X86Line (Nothing, instr)) is
+
+malignifyVarName :: VarName -> Symbol
+malignifyVarName x = "var_" ++ x
+
+
+machineInstructionToX86 :: Instruction -> [X86Instruction]
+machineInstructionToX86 E = [ Xor (Register Rdi) (Register Rdi)
+                            , Call $ Symbol "exit"
+                            ]
+machineInstructionToX86 R = [ Call $ Symbol "runtime_read"
+                            , Push $ Register Rax
+                            ]
+machineInstructionToX86 W = [ Pop $ Register Rdi
+                            , Call $ Symbol "runtime_write"
+                            ]
+machineInstructionToX86 (I n) = [ Push $ Immediate (fromIntegral n) ]
+machineInstructionToX86 (L x) = [ Push $ Symbol (malignifyVarName x) ]
+machineInstructionToX86 (S x) = [ Pop $ Symbol (malignifyVarName x) ]
+machineInstructionToX86 (B op) = binaryOperatorToX86 op
+machineInstructionToX86 (J addr) = [ Jmp $ Local addr ]
+machineInstructionToX86 (JT addr) = [ Pop $ Register Rax
+                                    , Or (Register Rax) (Register Rax)
+                                    , JmpCond IfNz (Local addr)
+                                    ]
+machineInstructionToX86 (JF addr) = [ Pop $ Register Rax
+                                    , Or (Register Rax) (Register Rax)
+                                    , JmpCond IfZ (Local addr)
+                                    ]
+
+
+simpleBinOpToX86 :: (X86Operand -> X86Operand -> X86Instruction) -> [X86Instruction]
+simpleBinOpToX86 mnemonic = [ Pop $ Register Rcx
+                            , mnemonic (Indirect Rsp) (Register Rcx)  -- Intel Order for Operands
+                            ]
+
+divModToX86 :: X86Reg -> [X86Instruction]
+divModToX86 resultReg = [ Pop $ Register Rcx
+                        , Pop $ Register Rax
+                        , Cqo
+                        , Idiv $ Register Rcx
+                        , Push $ Register resultReg
+                        ]
+
+comparisonToX86 :: X86Condition -> [X86Instruction]
+comparisonToX86 cond = [ Pop $ Register Rcx
+                       , Pop $ Register Rax
+                       , Cmp (Register Rax) (Register Rcx)  -- Intel Order for Operands
+                       , SetCond cond $ Register Rbl
+                       , Push $ Register Rbx
+                       ]
+
+binaryOperatorToX86 :: BinaryOperator -> [X86Instruction]
+binaryOperatorToX86 Mul = [ Pop $ Register Rax
+                          , IMul $ Indirect Rsp
+                          , Mov (Indirect Rsp) (Register Rax)  -- Intel Order for Operands
+                          ]
+binaryOperatorToX86 Add = simpleBinOpToX86 XAdd
+binaryOperatorToX86 Sub = simpleBinOpToX86 XSub
+binaryOperatorToX86 Disj = simpleBinOpToX86 Or
+binaryOperatorToX86 Conj = simpleBinOpToX86 And
+
+binaryOperatorToX86 Mod = divModToX86 Rdx
+binaryOperatorToX86 Div = divModToX86 Rax
+
+binaryOperatorToX86 Lt = comparisonToX86 IfL
+binaryOperatorToX86 Gt = comparisonToX86 IfG
+binaryOperatorToX86 Eq = comparisonToX86 IfE
+binaryOperatorToX86 Neq = comparisonToX86 IfNe
+binaryOperatorToX86 Le = comparisonToX86 IfLe
+binaryOperatorToX86 Ge = comparisonToX86 IfGe
+
+
+machineProgramToX86MainFunction :: SMProgram -> [X86Line]
+machineProgramToX86MainFunction (SMProgram instrs) =
+  setLabel (Global "main") [ Xor (Register Rbx) (Register Rbx) ] :
+  zipWith (\instr addr -> setLabel (Local addr) (machineInstructionToX86 instr)) instrs [0..]
+  |> concat
+
+
+
+type Size = Int
+type Level = Int  -- for pretty-printing purposes only
+
+intSize :: Int
+intSize = 8
+
+data GasDirective = Globl Symbol
+                  | Comm Symbol Size
+
+data GasInstruction = GasInstruction X86Instruction
+                    | GasDirective GasDirective
+
+newtype GasLine = GasLine (Level, Maybe X86Label, Maybe GasInstruction)
+
+instance Show GasLine where
+  show (GasLine (level, label, instr)) =
+    showAsmLine labelWidth (x86InstructionIndent * level) label (instr >>= (return . show))
+
+appendEmptyLine :: [GasLine] -> [GasLine]
+appendEmptyLine [] = []
+appendEmptyLine lines@(GasLine (level, _, _) : _) = lines ++ [GasLine (level, Nothing, Nothing)]
+
+varSymbols :: [X86Line] -> [Symbol]
+varSymbols = nub . mapMaybe extractSymbol
+  where extractSymbol (X86Line (_, instr)) | Push (Symbol symbol) <- instr = Just symbol
+                                           | Pop (Symbol symbol) <- instr = Just symbol
+                                           | otherwise = Nothing
+
+allocateSpaceForVars :: [X86Line] -> [GasLine]
+allocateSpaceForVars x86Function =
+  x86Function |> varSymbols
+              |> map (\varName -> GasLine (0, Nothing, Just $ GasDirective $ Comm varName intSize))
+              |> appendEmptyLine
+
+globalSymbols :: [X86Line] -> [Symbol]
+globalSymbols = nub . mapMaybe extractSymbol
+  where extractSymbol (X86Line (Just (Global symbol), _)) = Just symbol
+        extractSymbol _ = Nothing
+
+declareGlobalSymbols :: [X86Line] -> [GasLine]
+declareGlobalSymbols x86Function =
+ x86Function |> globalSymbols
+             |> map (\symbol -> GasLine (0, Nothing, Just $ GasDirective $ Globl symbol))
+             |> appendEmptyLine
+
+
+renderGasLines :: [X86Line] -> [GasLine]
+renderGasLines x86Function =
+  declareGlobalSymbols x86Function ++
+  allocateSpaceForVars x86Function ++
+  map (\(X86Line (label, instr)) -> GasLine(1, label, Just $ GasInstruction instr)) x86Function
+
+
+mnemonicWidth :: Int
+mnemonicWidth = 5
+
+labelWidth :: Int
+labelWidth = 5
+
+x86InstructionIndent :: Int
+x86InstructionIndent = 8
+
+withSOperands :: String -> [String] -> String
+withSOperands mnemonic operands = ljust mnemonicWidth mnemonic ++ " " ++ intercalate ", " operands
+
+withOperands :: (Show a) => String -> [a] -> String
+withOperands mnemonic operands = withSOperands mnemonic (map show operands)
+
+instance Show GasDirective where
+  show (Globl symbol) = withSOperands ".globl" [symbol]
+  show (Comm symbol size) = withSOperands ".comm" [symbol, show size]
+
+instance Show GasInstruction where
+  show (GasInstruction instr) = show instr
+  show (GasDirective directive) = show directive
+
+instance Show X86Reg where
+  show Rax = "%rax"
+  show Rcx = "%rcx"
+  show Rbx = "%rbx"
+  show Rdx = "%rdx"
+  show Rdi = "%rdi"
+  show Rsp = "%rsp"
+  show Rbl = "%bl"
+
+instance Show X86Operand where
+  show (Register reg) = show reg
+  show (Symbol symbol) = symbol
+  show (Immediate n) = "$" ++ show n
+  show (Indirect reg) = "(" ++ show reg ++ ")"
+
+instance Show X86Label where
+  show (Local addr) = ".L" ++ show addr
+  show (Global symbol) = symbol
+
+instance Show X86Condition where
+  show IfE = "e"
+  show IfNe = "ne"
+  show IfZ = "z"
+  show IfNz = "nz"
+  show IfL = "l"
+  show IfG = "g"
+  show IfLe = "le"
+  show IfGe = "ge"
+
+instance Show X86Instruction where
+  show (Xor dst src) = withOperands "xorq" [src, dst]
+  show (Or dst src) = withOperands "orq" [src, dst]
+  show (And dst src) = withOperands "andq" [src, dst]
+  show (XAdd dst src) = withOperands "addq" [src, dst]
+  show (IMul src) = withOperands "imulq" [src]
+  show (XSub dst src) = withOperands "subq" [src, dst]
+  show Cqo = "cqto"
+  show (Idiv operand) = withOperands "idivq" [operand]
+  show (Mov dst src) = withOperands "movq" [src, dst]
+  show (Cmp src1 src2) = withOperands "cmpq" [src2, src1]
+  show (SetCond cond dst) = withOperands ("set" ++ show cond) [dst]
+  show (JmpCond cond label) = withOperands ("j" ++ show cond) [label]
+  show (Jmp label) = withOperands "jmp" [label]
+  show (Call src) = withOperands "call" [src]
+  show (Push src) = withOperands "pushq" [src]
+  show (Pop dst) = withOperands "popq" [dst]
+
+showAsmLine :: Int -> Int -> Maybe X86Label -> Maybe String -> String
+showAsmLine labelWidth instrIndent label instr =
+  let label' = maybe "" (rjust labelWidth . (++ ":") . show) label
+  in  if length' label' <= instrIndent
+      then maybe label' (ljust instrIndent label' ++) instr
+      else label' ++ maybe "" (("\n" ++ replicate instrIndent ' ') ++) instr
+        where length' s = if length s == 0 then 0 else length s + 1
+
+
+newtype GasSource = GasSource [GasLine]
+
+instance Show GasSource where
+  show (GasSource lines) = concat $ map ((++ "\n"). show) lines
+
+
+renderGasSource :: SMProgram -> GasSource
+renderGasSource = GasSource . renderGasLines . machineProgramToX86MainFunction
+
+gasStringOfProgram :: Statement -> String
+gasStringOfProgram = show . renderGasSource . compileProgram
+
+compileAndWriteGasSourceFile :: FilePath -> Statement -> IO ()
+compileAndWriteGasSourceFile filename = writeFile filename . gasStringOfProgram
+
+compileAndWriteBinaryExecutable :: FilePath -> Statement -> IO Bool
+compileAndWriteBinaryExecutable exeFileName program = do
+  let sourceFilename = exeFileName ++ ".s"
+  compileAndWriteGasSourceFile sourceFilename program
+  gccExitCode <- rawSystem "gcc" ["runtime.c", sourceFilename, "-o", exeFileName]
+  exeOk <- doesFileExist exeFileName
+  return $ assert (gccExitCode == ExitSuccess) exeOk
+
+
+checkBinaryProgram :: FilePath -> Statement -> Stream -> Stream -> IO Bool
+checkBinaryProgram exeFileName program input expected = do
+  exeOk <- compileAndWriteBinaryExecutable exeFileName program
+  if not exeOk then return False
+  else do actualString <- readProcess ("./" ++ exeFileName) [] (unlines $ map show input)
+          let verdict = lines actualString == map show expected
+          return $ assert verdict verdict
+
+
+testProgram4 :: Statement
+testProgram4 = checkProgramOfExpression test1Env test1Expr test1Expected
+
+testProgram5 :: Statement
+testProgram5 = checkProgramOfExpression test2Env test2Expr test2Expected
+
+
+prettyCheckOfBinaryProgram :: FilePath -> Statement -> Stream -> Stream -> IO ()
+prettyCheckOfBinaryProgram exeFileName program input expected = do
+  ok <- checkBinaryProgram exeFileName program input expected
+  let verdict = if ok then "OK" else "FAIL"
+  putStrLn $ "Compile to x86-64 machine code and test binary program " ++ exeFileName ++ ": " ++ verdict
 
 
 
@@ -762,8 +1090,16 @@ main = do
   putStrLn testMachineExpressionValue2
   putStrLn ""
   putStrLn checkedCompiledProgram1
-  putStrLn ("Compiler Output:\n" ++ show (compileProgram testProgram1) ++ "\n")
+  putStrLn ("Compiler Output:\n" ++ show (compileProgram testProgram1))
+  prettyCheckOfBinaryProgram "program1" testProgram1 [8] [40320]
+  putStrLn "\n"
   putStrLn checkedCompiledProgram2
-  putStrLn ("Compiler Output:\n" ++ show (compileProgram testProgram2) ++ "\n")
+  putStrLn ("Compiler Output:\n" ++ show (compileProgram testProgram2))
+  prettyCheckOfBinaryProgram "program2" testProgram2 [832040, 1346269] [1]
+  putStrLn "\n"
   putStrLn checkedCompiledProgram3
-  putStrLn ("Compiler Output:\n" ++ show (compileProgram testProgram3) ++ "\n")
+  putStrLn ("Compiler Output:\n" ++ show (compileProgram testProgram3))
+  prettyCheckOfBinaryProgram "program3" testProgram3 [12] [1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144]
+  putStrLn "\n"
+  prettyCheckOfBinaryProgram "program4" testProgram4 [] [1]
+  prettyCheckOfBinaryProgram "program5" testProgram5 [] [1]

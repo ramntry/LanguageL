@@ -925,7 +925,8 @@ newtype X86LinesPrinter = PrintLines [X86Line]
 newtype X86BasicBlocksPrinter = PrintBlocks [[X86Line]]
 
 instance Show X86Line where
-  show (X86Line label instr) = showAsmLine labelWidth x86InstructionIndent label (Just (show instr))
+  show line@(X86Line label instr) =
+    showAsmLine defaultLabelWidth x86InstructionIndent label (Just (show instr))
 
 instance Show X86LinesPrinter where
   show (PrintLines lines) = unlines . map show $ lines
@@ -1192,11 +1193,15 @@ newtype GasLinesPrinter = PrintGasLines [GasLine]
 
 instance Show GasLine where
   show (GasLine (level, label, instr)) =
-    showAsmLine labelWidth (x86InstructionIndent * level) label (instr >>= (return . show))
+    showAsmLine defaultLabelWidth (x86InstructionIndent * level) label (instr >>= (return . show))
 
 instance Show GasLinesPrinter where
   show (PrintGasLines lines) = unlines . map show $ lines
 
+
+fromGasLine :: GasLine -> Maybe X86Line
+fromGasLine (GasLine (_, label, Just (GasInstruction instr))) = Just $ X86Line label instr
+fromGasLine _ = Nothing
 
 appendEmptyLine :: [GasLine] -> [GasLine]
 appendEmptyLine [] = []
@@ -1240,8 +1245,13 @@ renderGasLines x86Lines =
 mnemonicWidth :: Int
 mnemonicWidth = 5
 
-labelWidth :: Int
-labelWidth = 5
+defaultLabelWidth :: Int
+defaultLabelWidth = 6
+
+localLabelWidth :: [X86Line] -> Int
+localLabelWidth lines = let maxLabel = max 0 $ freeLocalLabelNumber lines - 1
+                            len = length (show $ Local maxLabel) + 1
+                        in  len + len `mod` 2
 
 x86InstructionIndent :: Int
 x86InstructionIndent = 8
@@ -1309,8 +1319,8 @@ instance Show X86Instruction where
   show Nop = "nop"
 
 showAsmLine :: Int -> Int -> Maybe X86Label -> Maybe String -> String
-showAsmLine labelWidth instrIndent label instr =
-  let label' = maybe "" (rjust labelWidth . (++ ":") . show) label
+showAsmLine defaultLabelWidth instrIndent label instr =
+  let label' = maybe "" (rjust defaultLabelWidth . (++ ":") . show) label
   in  if length' label' <= instrIndent
       then maybe label' (ljust instrIndent label' ++) instr
       else label' ++ maybe "" (("\n" ++ replicate instrIndent ' ') ++) instr
@@ -1320,7 +1330,10 @@ showAsmLine labelWidth instrIndent label instr =
 newtype GasSource = GasSource [GasLine]
 
 instance Show GasSource where
-  show (GasSource lines) = concat $ map ((++ "\n"). show) lines
+  show (GasSource lines) = concat $ map ((++ "\n"). showGasLine) lines
+    where showGasLine (GasLine (level, label, instr)) =
+            showAsmLine labelWidth (x86InstructionIndent * level) label (instr >>= (return . show))
+          labelWidth = localLabelWidth $ mapMaybe fromGasLine lines
 
 
 renderGasSource :: SMProgram -> GasSource

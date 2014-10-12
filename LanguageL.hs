@@ -1,10 +1,12 @@
 module Main where
 
 import Control.Exception.Base (assert)
+import Control.Monad (mplus)
 import Data.Function (on)
 import Data.Maybe (mapMaybe)
 import Data.List (intercalate, nub)
 import qualified Data.Map as Map
+import qualified Data.Set as Set
 
 import Text.ParserCombinators.Parsec (GenParser, (<|>), (<?>), satisfy, many, parse, char, string, try)
 import Text.ParserCombinators.Parsec.Combinator (many1)
@@ -404,6 +406,12 @@ checkHistory program input expected = assert (actual == expected) $
     where history = stepByStep program input
           actual = configurationOfHistory history
 
+
+programOfExpression :: [(VarName, Integer)] -> Expression -> Statement
+programOfExpression env expr =
+  foldr (\(x, n) acc -> x ::= C n:. acc) (Write (expr)) env
+
+
 testProgram1 :: Statement
 testProgram1 =
   Read "n":.
@@ -436,10 +444,6 @@ testProgram3 =
     "tmp" ::= V "next":.
     "next" ::= V "curr" :+ V "next":.
     "curr" ::= V "tmp")
-
-checkProgramOfExpression :: [(VarName, Integer)] -> Expression -> Integer -> Statement
-checkProgramOfExpression env expr expected =
-  foldr (\(x, n) acc -> x ::= C n:. acc) (Write (expr :== C expected)) env
 
 
 checkedProgram1 :: String
@@ -772,6 +776,7 @@ data X86Operand = Register X86Reg
 
 data X86Label = Local Addr
               | Global Symbol
+  deriving (Eq, Ord)
 
 data X86Condition = IfE
                   | IfNe
@@ -799,6 +804,12 @@ data X86Instruction = Xor X86Operand X86Operand
                     | Call X86Operand
                     | Push X86Operand
                     | Pop X86Operand
+                    | Nop
+
+jumpTarget :: X86Instruction -> Maybe X86Label
+jumpTarget (JmpCond _ label) = Just label
+jumpTarget (Jmp label) = Just label
+jumpTarget _ = Nothing
 
 
 newtype X86Line = X86Line (Maybe X86Label, X86Instruction)
@@ -810,6 +821,13 @@ instance Show X86Line where
 setLabel :: X86Label -> [X86Instruction] -> [X86Line]
 setLabel _ [] = x86InternalError "Can not label an empty set of x86 instructions"
 setLabel label (i : is) = X86Line (Just label, i) : map (\instr -> X86Line (Nothing, instr)) is
+
+fromInstr :: X86Instruction -> X86Line
+fromInstr instr = X86Line (Nothing, instr)
+
+getInstr :: X86Line -> X86Instruction
+getInstr (X86Line (_, instr)) = instr
+
 
 malignifyVarName :: VarName -> Symbol
 malignifyVarName x = "var_" ++ x
@@ -882,11 +900,123 @@ binaryOperatorToX86 Le = comparisonToX86 IfLe
 binaryOperatorToX86 Ge = comparisonToX86 IfGe
 
 
-machineProgramToX86MainFunction :: SMProgram -> [X86Line]
-machineProgramToX86MainFunction (SMProgram instrs) =
+machineProgramToX86Lines :: SMProgram -> [X86Line]
+machineProgramToX86Lines (SMProgram instrs) =
   setLabel (Global "main") [ Xor (Register Rbx) (Register Rbx) ] :
   zipWith (\instr addr -> setLabel (Local addr) (machineInstructionToX86 instr)) instrs [0..]
   |> concat
+
+
+jumpTargets :: [X86Line] -> Set.Set X86Label
+jumpTargets = Set.fromList . mapMaybe jumpTarget . map getInstr
+
+isUnconditionalBranch :: X86Instruction -> Bool
+isUnconditionalBranch (Jmp _) = True
+isUnconditionalBranch (Call (Symbol "exit")) = True
+isUnconditionalBranch _ = False
+
+isConditionalBranch :: X86Instruction -> Bool
+isConditionalBranch (JmpCond _ _) = True
+isConditionalBranch _ = False
+
+isBranch :: X86Instruction -> Bool
+isBranch instr = isConditionalBranch instr || isUnconditionalBranch instr
+
+splitByBasicBlockBoundsUnsafe :: [X86Line] -> [[X86Line]]
+splitByBasicBlockBoundsUnsafe lines = fst . foldr step ([[]], (Nothing, Nop)) $ lines
+  where step line@(X86Line (label, instr)) (acc@(basicBlock : bbs), (nextLineLabel, nextInstr))
+          | isUnconditionalBranch instr
+            || isConditionalBranch instr && not (isBranch nextInstr)
+            || maybe False (flip Set.member targets) nextLineLabel = ([line] : acc, (label, instr))
+          | otherwise = ((line : basicBlock) : bbs, (label, instr))
+        targets = jumpTargets lines
+
+makeMovable :: [[X86Line]] -> [[X86Line]]
+makeMovable blocks@(_ : rest) = zipWith checkEnd blocks rest
+  where checkEnd current@(_ : _) nextBlock =
+          if isUnconditionalBranch . getInstr . last $ current then current
+          else current ++ case nextBlock of
+                            (X86Line (Just nextLabel, _) : _) -> [fromInstr $ Jmp nextLabel]
+                            [] -> []
+                            _ -> x86InternalError ("makeMovable: list of lists of lines must end with empty list"
+                                                ++ " and each list must begin with labeled instruction")
+        checkEnd _ _ = x86InternalError "makeMovable: each non-last list of lines must be non-empty"
+
+splitByBasicBlockBounds :: [X86Line] -> [[X86Line]]
+splitByBasicBlockBounds = makeMovable . splitByBasicBlockBoundsUnsafe
+
+
+linearize :: [[X86Line]] -> [X86Line]
+linearize [] = []
+linearize (basicBlock@(_ : _ : _) : tail@((X86Line (Just label, _) : _) : _))
+  | (jumpTarget . getInstr . last) basicBlock == Just label = init basicBlock ++ linearize tail
+linearize (basicBlock : tail) = basicBlock ++ linearize tail
+
+
+shuffleBasicBlocksForTest :: [X86Line] -> [X86Line]
+shuffleBasicBlocksForTest lines =
+  lines |> backAndForth
+        |> backAndForth
+        |> reverse' reverse
+        |> backAndForth
+        |> reverse' swaps
+        |> backAndForth
+        |> reverse' reverse
+        |> reverse' swaps
+        |> reverse' reverse
+    where backAndForth = linearize . splitByBasicBlockBounds
+          reverse' tactic ls | (first : rest) <- splitByBasicBlockBounds ls = linearize (first : tactic rest)
+          swaps [] = []
+          swaps [bb] = [bb]
+          swaps (b1 : b2 : bbs) = b2 : b1 : swaps bbs
+
+
+pushPopToMovOpt :: [X86Line] -> [X86Line]
+pushPopToMovOpt [] = []
+pushPopToMovOpt (line1@(X86Line (_, Push (Symbol _))) : line2@(X86Line (_, Pop (Symbol _))) : rest) =
+  line1 : line2 : pushPopToMovOpt rest
+pushPopToMovOpt ((X86Line (l1, Push src)) : (X86Line (l2, Pop dst)) : rest) =
+  X86Line (l1 `mplus` l2, Mov dst src) : pushPopToMovOpt rest
+pushPopToMovOpt (line : rest) = line : pushPopToMovOpt rest
+
+movPopToMovOpt :: [X86Line] -> [X86Line]
+movPopToMovOpt [] = []
+movPopToMovOpt ((X86Line (l1, Mov (Indirect Rsp) src)) : (X86Line (l2, Pop dst)) : rest) =
+  X86Line (l1, Mov dst src) : X86Line (l2, XAdd (Register Rsp) (Immediate 8)) : movPopToMovOpt rest
+movPopToMovOpt (line : rest) = line : movPopToMovOpt rest
+
+doSomePerBasicBlockOptimizations :: [[X86Line] -> [X86Line]] -> [X86Line] -> [X86Line]
+doSomePerBasicBlockOptimizations optimizations =
+  linearize . map (foldl (.) id optimizations) . splitByBasicBlockBounds
+
+doPerBasicBlockOptimizations :: [X86Line] -> [X86Line]
+doPerBasicBlockOptimizations = doSomePerBasicBlockOptimizations
+  [ movPopToMovOpt
+  , pushPopToMovOpt
+  ]
+
+
+movZeroToXorOpt :: X86Instruction -> X86Instruction
+movZeroToXorOpt (Mov reg@(Register _) (Immediate 0)) = Xor reg reg
+movZeroToXorOpt instr = instr
+
+doSomePerInstructionOptimizations :: [X86Instruction -> X86Instruction] -> [X86Line] -> [X86Line]
+doSomePerInstructionOptimizations optimizations = map (\(X86Line (label, instr)) -> X86Line (label, opt instr))
+  where opt = foldl (.) id optimizations
+
+doPerInstructionOptimizations :: [X86Line] -> [X86Line]
+doPerInstructionOptimizations = doSomePerInstructionOptimizations
+  [ movZeroToXorOpt
+  ]
+
+doOptimizations :: [[X86Line] -> [X86Line]] -> [X86Line] -> [X86Line]
+doOptimizations optimizations = foldl (.) id optimizations
+
+optimize :: [X86Line] -> [X86Line]
+optimize = doOptimizations
+  [ doPerInstructionOptimizations
+  , doPerBasicBlockOptimizations
+  ]
 
 
 
@@ -919,10 +1049,10 @@ varSymbols = nub . mapMaybe extractSymbol
                                            | otherwise = Nothing
 
 allocateSpaceForVars :: [X86Line] -> [GasLine]
-allocateSpaceForVars x86Function =
-  x86Function |> varSymbols
-              |> map (\varName -> GasLine (0, Nothing, Just $ GasDirective $ Comm varName intSize))
-              |> appendEmptyLine
+allocateSpaceForVars x86Lines =
+  x86Lines |> varSymbols
+           |> map (\varName -> GasLine (0, Nothing, Just $ GasDirective $ Comm varName intSize))
+           |> appendEmptyLine
 
 globalSymbols :: [X86Line] -> [Symbol]
 globalSymbols = nub . mapMaybe extractSymbol
@@ -930,17 +1060,19 @@ globalSymbols = nub . mapMaybe extractSymbol
         extractSymbol _ = Nothing
 
 declareGlobalSymbols :: [X86Line] -> [GasLine]
-declareGlobalSymbols x86Function =
- x86Function |> globalSymbols
-             |> map (\symbol -> GasLine (0, Nothing, Just $ GasDirective $ Globl symbol))
-             |> appendEmptyLine
+declareGlobalSymbols x86Lines =
+ x86Lines |> globalSymbols
+          |> map (\symbol -> GasLine (0, Nothing, Just $ GasDirective $ Globl symbol))
+          |> appendEmptyLine
 
 
 renderGasLines :: [X86Line] -> [GasLine]
-renderGasLines x86Function =
-  declareGlobalSymbols x86Function ++
-  allocateSpaceForVars x86Function ++
-  map (\(X86Line (label, instr)) -> GasLine(1, label, Just $ GasInstruction instr)) x86Function
+renderGasLines x86Lines =
+  declareGlobalSymbols x86Lines ++
+  allocateSpaceForVars x86Lines ++
+  ( x86Lines |> optimize
+             |> map (\(X86Line (label, instr)) -> GasLine(1, label, Just $ GasInstruction instr))
+  )
 
 
 mnemonicWidth :: Int
@@ -1012,6 +1144,7 @@ instance Show X86Instruction where
   show (Call src) = withOperands "call" [src]
   show (Push src) = withOperands "pushq" [src]
   show (Pop dst) = withOperands "popq" [dst]
+  show Nop = "nop"
 
 showAsmLine :: Int -> Int -> Maybe X86Label -> Maybe String -> String
 showAsmLine labelWidth instrIndent label instr =
@@ -1029,7 +1162,7 @@ instance Show GasSource where
 
 
 renderGasSource :: SMProgram -> GasSource
-renderGasSource = GasSource . renderGasLines . machineProgramToX86MainFunction
+renderGasSource = GasSource . renderGasLines . machineProgramToX86Lines
 
 gasStringOfProgram :: Statement -> String
 gasStringOfProgram = show . renderGasSource . compileProgram
@@ -1053,14 +1186,6 @@ checkBinaryProgram exeFileName program input expected = do
   else do actualString <- readProcess ("./" ++ exeFileName) [] (unlines $ map show input)
           let verdict = lines actualString == map show expected
           return $ assert verdict verdict
-
-
-testProgram4 :: Statement
-testProgram4 = checkProgramOfExpression test1Env test1Expr test1Expected
-
-testProgram5 :: Statement
-testProgram5 = checkProgramOfExpression test2Env test2Expr test2Expected
-
 
 prettyCheckOfBinaryProgram :: FilePath -> Statement -> Stream -> Stream -> IO ()
 prettyCheckOfBinaryProgram exeFileName program input expected = do
@@ -1101,5 +1226,5 @@ main = do
   prettyCheckOfBinaryProgram "program1" testProgram1 [8] [40320]
   prettyCheckOfBinaryProgram "program2" testProgram2 [832040, 1346269] [1]
   prettyCheckOfBinaryProgram "program3" testProgram3 [12] [1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144]
-  prettyCheckOfBinaryProgram "program4" testProgram4 [] [1]
-  prettyCheckOfBinaryProgram "program5" testProgram5 [] [1]
+  prettyCheckOfBinaryProgram "program4" (programOfExpression test1Env test1Expr) [] [test1Expected]
+  prettyCheckOfBinaryProgram "program5" (programOfExpression test2Env test2Expr) [] [test2Expected]

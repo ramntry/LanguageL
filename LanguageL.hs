@@ -445,9 +445,117 @@ testProgram3 =
     "next" ::= V "curr" :+ V "next":.
     "curr" ::= V "tmp")
 
+testProgram6 =
+  Read "n":.
+  "x" ::= C 0:.
+  "y" ::= C 0:.
+  "n" ::= V "n" :- C 1:.
+  While (V "n" :> C 0) (
+    "k" ::= Dec "n":.
+    "i" ::= V "k":.
+    While (Dec "i" :> C 0) (
+      Write (V "y"):.
+      Write (Inc "x")):.
+    "i" ::= V "k":.
+    While (Dec "i" :> C 0) (
+      Write (Inc "y"):.
+      Write (V "x")):.
+    "i" ::= V "k":.
+    While (Dec "i" :> C 0) (
+      Write (V "y"):.
+      Write (Dec "x")):.
+    "i" ::= V "n":.
+    While (Dec "i" :> C 0) (
+      Write (Dec "y"):.
+      Write (V "x")):.
+    Write (V "y"):.
+    Write (Inc "x"):.
+    "n" ::= V "n" :- C 1):.
+  If (V "n" :== C 0) (
+    Write (V "y"):.
+    Write (V "x"))
+  (
+    Skip)
+
+
+type NameGenerator = VarName -> VarName
+type ListMacro = (VarName, VarName)
+
+isNotPrimeMacro :: NameGenerator -> VarName -> VarName -> Statement
+isNotPrimeMacro name number result = let divider = name "divider" in
+  result ::= C 0:.
+  divider ::= C 2:.
+  While (V divider :* V divider :<= V number :&& C 1 :- V result) (
+    If (V number :% V divider :== C 0) (
+      result ::= C 1)
+    (
+      divider ::= V divider :+ C 1))
+
+powerMacro :: NameGenerator -> VarName -> VarName -> Statement
+powerMacro name x power = let acc = name "acc" in
+  acc ::= C 1:.
+  While (V power :> C 0) (
+    If (V power :% C 2) (
+      acc ::= V acc :* V x)
+    (
+      Skip):.
+    x ::= V x :* V x:.
+    power ::= V power :/ C 2):.
+  x ::= V acc
+
+factorOutMacro :: VarName -> VarName -> VarName -> Statement
+factorOutMacro prime x power =
+  power ::= C 0:.
+  While (V x :% V prime :== C 0) (
+    power ::= V power :+ C 1:.
+    x ::= V x :/ V prime)
+
+emptyListMacro :: ListMacro -> Statement
+emptyListMacro (list, lastPrime) =
+  list ::= C 1:.
+  lastPrime ::= C 1
+
+pushMacro :: NameGenerator -> ListMacro -> VarName -> Statement
+pushMacro name (list, lastPrime) item = let notFoundYet = name "not_found_yet"
+                                            factor = name "factor" in
+  notFoundYet ::= C 1:.
+  While (V notFoundYet) (
+    lastPrime ::= V lastPrime :+ C 1:.
+    isNotPrimeMacro name lastPrime notFoundYet):.
+  factor ::= V lastPrime:.
+  powerMacro name factor item:.
+  list ::= V list :* V factor
+
+popMacro :: NameGenerator -> ListMacro -> VarName -> Statement
+popMacro name (list, lastPrime) result = let notFoundYet = name "not_found_yet" in
+  factorOutMacro lastPrime list result:.
+  notFoundYet ::= C 1:.
+  While (V notFoundYet) (
+    lastPrime ::= V lastPrime :- C 1:.
+    isNotPrimeMacro name lastPrime notFoundYet)
+
+
+testProgram7 = let list = ("list", "last_prime") in
+  Read "n":.
+  emptyListMacro list:.
+  "i" ::= V "n":.
+  While (Dec "i" :> C 0) (
+    Read "x":.
+    pushMacro id list "x"):.
+  Write (V "n"):.
+  "i" ::= V "n":.
+  While (Dec "i" :> C 0) (
+    popMacro id list "x":.
+    Write (V "x"))
+
 
 checkedProgram1 :: String
 checkedProgram1 = checkProgram programSema testProgram1 [6] [720]
+
+checkedProgram7 :: String
+checkedProgram7 = checkProgram compiledProgramSema testProgram7 (len : testList) (len : reverse testList)
+  where testList = [2, 15, 3, 0, 9, 6, 4, 11, 2, 5, 7, 2, 1, 0, 0, 1]
+        len = fromIntegral $ length testList
 
 checkedHistory1 :: String
 checkedHistory1 = checkHistory testProgram1 [2]
@@ -812,21 +920,29 @@ jumpTarget (Jmp label) = Just label
 jumpTarget _ = Nothing
 
 
-newtype X86Line = X86Line (Maybe X86Label, X86Instruction)
+data X86Line = X86Line (Maybe X86Label) X86Instruction
+newtype X86LinesPrinter = PrintLines [X86Line]
+newtype X86BasicBlocksPrinter = PrintBlocks [[X86Line]]
 
 instance Show X86Line where
-  show (X86Line (label, instr)) = showAsmLine labelWidth x86InstructionIndent label (Just (show instr))
+  show (X86Line label instr) = showAsmLine labelWidth x86InstructionIndent label (Just (show instr))
+
+instance Show X86LinesPrinter where
+  show (PrintLines lines) = unlines . map show $ lines
+
+instance Show X86BasicBlocksPrinter where
+  show (PrintBlocks blocks) = unlines . map show $ map PrintLines blocks
 
 
 setLabel :: X86Label -> [X86Instruction] -> [X86Line]
 setLabel _ [] = x86InternalError "Can not label an empty set of x86 instructions"
-setLabel label (i : is) = X86Line (Just label, i) : map (\instr -> X86Line (Nothing, instr)) is
+setLabel label (i : is) = X86Line (Just label) i : map (X86Line Nothing) is
 
 fromInstr :: X86Instruction -> X86Line
-fromInstr instr = X86Line (Nothing, instr)
+fromInstr = X86Line Nothing
 
 getInstr :: X86Line -> X86Instruction
-getInstr (X86Line (_, instr)) = instr
+getInstr (X86Line _ instr) = instr
 
 
 malignifyVarName :: VarName -> Symbol
@@ -922,11 +1038,27 @@ isConditionalBranch _ = False
 isBranch :: X86Instruction -> Bool
 isBranch instr = isConditionalBranch instr || isUnconditionalBranch instr
 
+freeLocalLabelNumber :: [X86Line] -> Addr
+freeLocalLabelNumber = foldl step 0
+  where step acc (X86Line (Just (Local addr)) _) = max acc (addr + 1)
+        step acc _ = acc
+
+ensureLabel :: Addr -> X86Line -> (X86Line, Addr)
+ensureLabel freeLabelNumber line@(X86Line (Just _) _) = (line, freeLabelNumber)
+ensureLabel freeLabelNumber (X86Line Nothing instr) =
+  (X86Line (Just $ Local freeLabelNumber) instr, freeLabelNumber + 1)
+
+ensureBlocksAreLabeled :: [[X86Line]] -> [[X86Line]]
+ensureBlocksAreLabeled lines = fst . foldr step ([], freeLocalLabelNumber (concat lines)) $ lines
+  where step (line : rest) (acc, freeNumber) = let (labeledLine, newNumber) = ensureLabel freeNumber line
+                                               in  ((labeledLine : rest) : acc, newNumber)
+        step [] (acc, freeNumber) = ([] : acc, freeNumber)
+
 splitByBasicBlockBoundsUnsafe :: [X86Line] -> [[X86Line]]
 splitByBasicBlockBoundsUnsafe lines = fst . foldr step ([[]], (Nothing, Nop)) $ lines
-  where step line@(X86Line (label, instr)) (acc@(basicBlock : bbs), (nextLineLabel, nextInstr))
+  where step line@(X86Line label instr) (acc@(basicBlock : bbs), (nextLineLabel, nextInstr))
           | isUnconditionalBranch instr
-            || isConditionalBranch instr && not (isBranch nextInstr)
+            || isConditionalBranch instr && not (isUnconditionalBranch nextInstr)
             || maybe False (flip Set.member targets) nextLineLabel = ([line] : acc, (label, instr))
           | otherwise = ((line : basicBlock) : bbs, (label, instr))
         targets = jumpTargets lines
@@ -936,19 +1068,19 @@ makeMovable blocks@(_ : rest) = zipWith checkEnd blocks rest
   where checkEnd current@(_ : _) nextBlock =
           if isUnconditionalBranch . getInstr . last $ current then current
           else current ++ case nextBlock of
-                            (X86Line (Just nextLabel, _) : _) -> [fromInstr $ Jmp nextLabel]
+                            (X86Line (Just nextLabel) _ : _) -> [fromInstr $ Jmp nextLabel]
                             [] -> []
                             _ -> x86InternalError ("makeMovable: list of lists of lines must end with empty list"
                                                 ++ " and each list must begin with labeled instruction")
         checkEnd _ _ = x86InternalError "makeMovable: each non-last list of lines must be non-empty"
 
 splitByBasicBlockBounds :: [X86Line] -> [[X86Line]]
-splitByBasicBlockBounds = makeMovable . splitByBasicBlockBoundsUnsafe
+splitByBasicBlockBounds = makeMovable . ensureBlocksAreLabeled . splitByBasicBlockBoundsUnsafe
 
 
 linearize :: [[X86Line]] -> [X86Line]
 linearize [] = []
-linearize (basicBlock@(_ : _ : _) : tail@((X86Line (Just label, _) : _) : _))
+linearize (basicBlock@(_ : _ : _) : tail@(((X86Line (Just label) _) : _) : _))
   | (jumpTarget . getInstr . last) basicBlock == Just label = init basicBlock ++ linearize tail
 linearize (basicBlock : tail) = basicBlock ++ linearize tail
 
@@ -961,28 +1093,51 @@ shuffleBasicBlocksForTest lines =
         |> backAndForth
         |> reverse' swaps
         |> backAndForth
+        |> reverse' swaps3
+        |> reverse' reverse
+        |> backAndForth
         |> reverse' reverse
         |> reverse' swaps
-        |> reverse' reverse
+        |> backAndForth
     where backAndForth = linearize . splitByBasicBlockBounds
           reverse' tactic ls | (first : rest) <- splitByBasicBlockBounds ls = linearize (first : tactic rest)
-          swaps [] = []
-          swaps [bb] = [bb]
           swaps (b1 : b2 : bbs) = b2 : b1 : swaps bbs
+          swaps shorter = shorter
+          swaps3 (b1 : b2 : b3 : bbs) = b3 : b1 : b2 : swaps bbs
+          swaps3 shorter = shorter
+
+manyJumpsTestCase :: [X86Line]
+manyJumpsTestCase =
+  let readValue = setLabel (Global "main") $ machineInstructionToX86 R
+      lessLabel = Global "less"
+      greaterLabel = Global "greater"
+      afterSwitchLabel = Global "after_switch"
+      switch = map fromInstr [ Cmp (Indirect Rsp) (Immediate 0)
+                             , JmpCond IfL lessLabel
+                             , JmpCond IfG greaterLabel
+                             ]
+      ifZeroBB = [ fromInstr $ Jmp afterSwitchLabel ]
+      ifLessBB = setLabel lessLabel [ Mov (Indirect Rsp) (Immediate (-1))
+                                    , Jmp afterSwitchLabel
+                                    ]
+      ifGreaterBB = setLabel greaterLabel [ Mov (Indirect Rsp) (Immediate 1) ]
+      writeResult = setLabel afterSwitchLabel $ machineInstructionToX86 W
+      programEnd = map fromInstr $ machineInstructionToX86 E
+  in  readValue ++ switch ++ ifZeroBB ++ ifLessBB ++ ifGreaterBB ++ writeResult ++ programEnd
 
 
 pushPopToMovOpt :: [X86Line] -> [X86Line]
 pushPopToMovOpt [] = []
-pushPopToMovOpt (line1@(X86Line (_, Push (Symbol _))) : line2@(X86Line (_, Pop (Symbol _))) : rest) =
+pushPopToMovOpt (line1@(X86Line _ (Push (Symbol _))) : line2@(X86Line _ (Pop (Symbol _))) : rest) =
   line1 : line2 : pushPopToMovOpt rest
-pushPopToMovOpt ((X86Line (l1, Push src)) : (X86Line (l2, Pop dst)) : rest) =
-  X86Line (l1 `mplus` l2, Mov dst src) : pushPopToMovOpt rest
+pushPopToMovOpt ((X86Line l1 (Push src)) : (X86Line l2 (Pop dst)) : rest) =
+  X86Line (l1 `mplus` l2) (Mov dst src) : pushPopToMovOpt rest
 pushPopToMovOpt (line : rest) = line : pushPopToMovOpt rest
 
 movPopToMovOpt :: [X86Line] -> [X86Line]
 movPopToMovOpt [] = []
-movPopToMovOpt ((X86Line (l1, Mov (Indirect Rsp) src)) : (X86Line (l2, Pop dst)) : rest) =
-  X86Line (l1, Mov dst src) : X86Line (l2, XAdd (Register Rsp) (Immediate 8)) : movPopToMovOpt rest
+movPopToMovOpt ((X86Line l1 (Mov (Indirect Rsp) src)) : (X86Line l2 (Pop dst)) : rest) =
+  X86Line l1 (Mov dst src) : X86Line l2 (XAdd (Register Rsp) (Immediate 8)) : movPopToMovOpt rest
 movPopToMovOpt (line : rest) = line : movPopToMovOpt rest
 
 doSomePerBasicBlockOptimizations :: [[X86Line] -> [X86Line]] -> [X86Line] -> [X86Line]
@@ -1001,7 +1156,7 @@ movZeroToXorOpt (Mov reg@(Register _) (Immediate 0)) = Xor reg reg
 movZeroToXorOpt instr = instr
 
 doSomePerInstructionOptimizations :: [X86Instruction -> X86Instruction] -> [X86Line] -> [X86Line]
-doSomePerInstructionOptimizations optimizations = map (\(X86Line (label, instr)) -> X86Line (label, opt instr))
+doSomePerInstructionOptimizations optimizations = map (\(X86Line label instr) -> X86Line label (opt instr))
   where opt = foldl (.) id optimizations
 
 doPerInstructionOptimizations :: [X86Line] -> [X86Line]
@@ -1033,10 +1188,15 @@ data GasInstruction = GasInstruction X86Instruction
                     | GasDirective GasDirective
 
 newtype GasLine = GasLine (Level, Maybe X86Label, Maybe GasInstruction)
+newtype GasLinesPrinter = PrintGasLines [GasLine]
 
 instance Show GasLine where
   show (GasLine (level, label, instr)) =
     showAsmLine labelWidth (x86InstructionIndent * level) label (instr >>= (return . show))
+
+instance Show GasLinesPrinter where
+  show (PrintGasLines lines) = unlines . map show $ lines
+
 
 appendEmptyLine :: [GasLine] -> [GasLine]
 appendEmptyLine [] = []
@@ -1044,9 +1204,9 @@ appendEmptyLine lines@(GasLine (level, _, _) : _) = lines ++ [GasLine (level, No
 
 varSymbols :: [X86Line] -> [Symbol]
 varSymbols = nub . mapMaybe extractSymbol
-  where extractSymbol (X86Line (_, instr)) | Push (Symbol symbol) <- instr = Just symbol
-                                           | Pop (Symbol symbol) <- instr = Just symbol
-                                           | otherwise = Nothing
+  where extractSymbol (X86Line _ instr) | Push (Symbol symbol) <- instr = Just symbol
+                                        | Pop (Symbol symbol) <- instr = Just symbol
+                                        | otherwise = Nothing
 
 allocateSpaceForVars :: [X86Line] -> [GasLine]
 allocateSpaceForVars x86Lines =
@@ -1056,7 +1216,7 @@ allocateSpaceForVars x86Lines =
 
 globalSymbols :: [X86Line] -> [Symbol]
 globalSymbols = nub . mapMaybe extractSymbol
-  where extractSymbol (X86Line (Just (Global symbol), _)) = Just symbol
+  where extractSymbol (X86Line (Just (Global symbol)) _) = Just symbol
         extractSymbol _ = Nothing
 
 declareGlobalSymbols :: [X86Line] -> [GasLine]
@@ -1071,7 +1231,9 @@ renderGasLines x86Lines =
   declareGlobalSymbols x86Lines ++
   allocateSpaceForVars x86Lines ++
   ( x86Lines |> optimize
-             |> map (\(X86Line (label, instr)) -> GasLine(1, label, Just $ GasInstruction instr))
+             |> shuffleBasicBlocksForTest
+             |> optimize
+             |> map (\(X86Line label instr) -> GasLine(1, label, Just $ GasInstruction instr))
   )
 
 
@@ -1228,3 +1390,11 @@ main = do
   prettyCheckOfBinaryProgram "program3" testProgram3 [12] [1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144]
   prettyCheckOfBinaryProgram "program4" (programOfExpression test1Env test1Expr) [] [test1Expected]
   prettyCheckOfBinaryProgram "program5" (programOfExpression test2Env test2Expr) [] [test2Expected]
+  putStrLn ""
+  prettyCheckOfBinaryProgram "program6" testProgram6 [2] [0, 0, 0, 1, 1, 1, 1, 0]
+  prettyCheckOfBinaryProgram "program6" testProgram6 [3] [0, 0, 0, 1, 0, 2, 1, 2, 2, 2, 2, 1, 2, 0, 1, 0, 1, 1]
+  putStrLn ""
+  putStrLn checkedProgram7
+  prettyCheckOfBinaryProgram "program7" testProgram7 [0] [0]
+  prettyCheckOfBinaryProgram "program7" testProgram7 [3, 1, 2, 3] [3, 3, 2, 1]
+  prettyCheckOfBinaryProgram "program7" testProgram7 [9, 7, 1, 0, 2, 3, 5, 1, 2, 0] [9, 0, 2, 1, 5, 3, 2, 0, 1, 7]

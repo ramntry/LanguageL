@@ -875,7 +875,7 @@ checkedCompiledProgram3 = checkProgram compiledProgramSema testProgram3 [10] [1,
 
 type Symbol = String
 
-data X86Reg = Rax | Rcx | Rbx | Rdx | Rdi | Rsp | Rbl
+data X86Reg = Rax | Rcx | Rbx | Rdx | Rdi | Rsp | Rbl | R12 | R13 | R14 | R15
 
 data X86Operand = Register X86Reg
                 | Symbol Symbol
@@ -901,7 +901,7 @@ data X86Instruction = Xor X86Operand X86Operand
                     | And X86Operand X86Operand
                     | XAdd X86Operand X86Operand
                     | XSub X86Operand X86Operand
-                    | IMul X86Operand
+                    | Imul X86Operand
                     | Cqo
                     | Idiv X86Operand
                     | Mov X86Operand X86Operand
@@ -909,7 +909,7 @@ data X86Instruction = Xor X86Operand X86Operand
                     | SetCond X86Condition X86Operand
                     | JmpCond X86Condition X86Label
                     | Jmp X86Label
-                    | Call X86Operand
+                    | Call X86Label
                     | Push X86Operand
                     | Pop X86Operand
                     | Nop
@@ -946,19 +946,50 @@ getInstr :: X86Line -> X86Instruction
 getInstr (X86Line _ instr) = instr
 
 
+getOperands :: X86Instruction -> [X86Operand]
+getOperands (Xor op1 op2) = [op1, op2]
+getOperands (Or op1 op2) = [op1, op2]
+getOperands (And op1 op2) = [op1, op2]
+getOperands (XAdd op1 op2) = [op1, op2]
+getOperands (XSub op1 op2) = [op1, op2]
+getOperands (Imul op1) = [op1]
+getOperands (Idiv op1) = [op1]
+getOperands (Mov op1 op2) = [op1, op2]
+getOperands (Cmp op1 op2) = [op1, op2]
+getOperands (SetCond _ op1) = [op1]
+getOperands (Push op1) = [op1]
+getOperands (Pop op1) = [op1]
+getOperands _ = []
+
+mapOperands :: (X86Operand -> X86Operand) -> X86Instruction -> X86Instruction
+mapOperands f (Xor op1 op2) = Xor (f op1) (f op2)
+mapOperands f (Or op1 op2) = Or (f op1) (f op2)
+mapOperands f (And op1 op2) = And (f op1) (f op2)
+mapOperands f (XAdd op1 op2) = XAdd (f op1) (f op2)
+mapOperands f (XSub op1 op2) = XSub (f op1) (f op2)
+mapOperands f (Imul op1) = Imul (f op1)
+mapOperands f (Idiv op1) = Idiv (f op1)
+mapOperands f (Mov op1 op2) = Mov (f op1) (f op2)
+mapOperands f (Cmp op1 op2) = Cmp (f op1) (f op2)
+mapOperands f (SetCond cond op1) = SetCond cond (f op1)
+mapOperands f (Push op1) = Push (f op1)
+mapOperands f (Pop op1) = Pop (f op1)
+mapOperands _ operandLess = operandLess
+
+
 malignifyVarName :: VarName -> Symbol
 malignifyVarName x = "var_" ++ x
 
 
 machineInstructionToX86 :: Instruction -> [X86Instruction]
 machineInstructionToX86 E = [ Xor (Register Rdi) (Register Rdi)
-                            , Call $ Symbol "exit"
+                            , Call $ Global "exit"
                             ]
-machineInstructionToX86 R = [ Call $ Symbol "runtime_read"
+machineInstructionToX86 R = [ Call $ Global "runtime_read"
                             , Push $ Register Rax
                             ]
 machineInstructionToX86 W = [ Pop $ Register Rdi
-                            , Call $ Symbol "runtime_write"
+                            , Call $ Global "runtime_write"
                             ]
 machineInstructionToX86 (I n) = [ Push $ Immediate (fromIntegral n) ]
 machineInstructionToX86 (L x) = [ Push $ Symbol (malignifyVarName x) ]
@@ -998,7 +1029,7 @@ comparisonToX86 cond = [ Pop $ Register Rcx
 
 binaryOperatorToX86 :: BinaryOperator -> [X86Instruction]
 binaryOperatorToX86 Mul = [ Pop $ Register Rax
-                          , IMul $ Indirect Rsp
+                          , Imul $ Indirect Rsp
                           , Mov (Indirect Rsp) (Register Rax)  -- Intel Order for Operands
                           ]
 binaryOperatorToX86 Add = simpleBinOpToX86 XAdd
@@ -1022,6 +1053,7 @@ machineProgramToX86Lines (SMProgram instrs) =
   setLabel (Global "main") [ Xor (Register Rbx) (Register Rbx) ] :
   zipWith (\instr addr -> setLabel (Local addr) (machineInstructionToX86 instr)) instrs [0..]
   |> concat
+  |> optimize
 
 
 jumpTargets :: [X86Line] -> Set.Set X86Label
@@ -1029,7 +1061,7 @@ jumpTargets = Set.fromList . mapMaybe jumpTarget . map getInstr
 
 isUnconditionalBranch :: X86Instruction -> Bool
 isUnconditionalBranch (Jmp _) = True
-isUnconditionalBranch (Call (Symbol "exit")) = True
+isUnconditionalBranch (Call (Global "exit")) = True
 isUnconditionalBranch _ = False
 
 isConditionalBranch :: X86Instruction -> Bool
@@ -1127,6 +1159,22 @@ manyJumpsTestCase =
   in  readValue ++ switch ++ ifZeroBB ++ ifLessBB ++ ifGreaterBB ++ writeResult ++ programEnd
 
 
+allocateRegistersOpt :: [X86Line] -> [X86Line]
+allocateRegistersOpt lines =
+  let replacement = zip (varSymbols lines) [R12, R13, R14, R15]
+      toRegister (Symbol symbol) | Just reg <- lookup symbol replacement = Register reg
+      toRegister other = other
+  in  map (\(X86Line label instr) -> X86Line label (mapOperands toRegister instr)) lines
+
+doSomeGlobalOptimizations :: [[X86Line] -> [X86Line]] -> [X86Line] -> [X86Line]
+doSomeGlobalOptimizations optimizations = foldl (.) id optimizations
+
+doGlobalOptimizations :: [X86Line] -> [X86Line]
+doGlobalOptimizations = doSomeGlobalOptimizations
+  [ allocateRegistersOpt
+  ]
+
+
 pushPopToMovOpt :: [X86Line] -> [X86Line]
 pushPopToMovOpt [] = []
 pushPopToMovOpt (line1@(X86Line _ (Push (Symbol _))) : line2@(X86Line _ (Pop (Symbol _))) : rest) =
@@ -1172,6 +1220,7 @@ optimize :: [X86Line] -> [X86Line]
 optimize = doOptimizations
   [ doPerInstructionOptimizations
   , doPerBasicBlockOptimizations
+  , doGlobalOptimizations
   ]
 
 
@@ -1208,10 +1257,9 @@ appendEmptyLine [] = []
 appendEmptyLine lines@(GasLine (level, _, _) : _) = lines ++ [GasLine (level, Nothing, Nothing)]
 
 varSymbols :: [X86Line] -> [Symbol]
-varSymbols = nub . mapMaybe extractSymbol
-  where extractSymbol (X86Line _ instr) | Push (Symbol symbol) <- instr = Just symbol
-                                        | Pop (Symbol symbol) <- instr = Just symbol
-                                        | otherwise = Nothing
+varSymbols = nub . mapMaybe getSymbol . concatMap (getOperands . getInstr)
+  where getSymbol (Symbol symbol) = Just symbol
+        getSymbol _ = Nothing
 
 allocateSpaceForVars :: [X86Line] -> [GasLine]
 allocateSpaceForVars x86Lines =
@@ -1235,10 +1283,8 @@ renderGasLines :: [X86Line] -> [GasLine]
 renderGasLines x86Lines =
   declareGlobalSymbols x86Lines ++
   allocateSpaceForVars x86Lines ++
-  ( x86Lines |> optimize
-             |> shuffleBasicBlocksForTest
-             |> optimize
-             |> map (\(X86Line label instr) -> GasLine(1, label, Just $ GasInstruction instr))
+  ( x86Lines
+     |> map (\(X86Line label instr) -> GasLine(1, label, Just $ GasInstruction instr))
   )
 
 
@@ -1278,6 +1324,10 @@ instance Show X86Reg where
   show Rdi = "%rdi"
   show Rsp = "%rsp"
   show Rbl = "%bl"
+  show R12 = "%r12"
+  show R13 = "%r13"
+  show R14 = "%r14"
+  show R15 = "%r15"
 
 instance Show X86Operand where
   show (Register reg) = show reg
@@ -1304,7 +1354,7 @@ instance Show X86Instruction where
   show (Or dst src) = withOperands "orq" [src, dst]
   show (And dst src) = withOperands "andq" [src, dst]
   show (XAdd dst src) = withOperands "addq" [src, dst]
-  show (IMul src) = withOperands "imulq" [src]
+  show (Imul src) = withOperands "imulq" [src]
   show (XSub dst src) = withOperands "subq" [src, dst]
   show Cqo = "cqto"
   show (Idiv operand) = withOperands "idivq" [operand]
@@ -1370,6 +1420,12 @@ prettyCheckOfBinaryProgram exeFileName program input expected = do
 
 
 
+program7BigBinaryCheck :: IO ()
+program7BigBinaryCheck = prettyCheckOfBinaryProgram "program7" testProgram7 (len : testList) (len : reverse testList)
+  where testList = [0, 0, 0, 6, 0, 0, 0, 0, 4, 0, 0, 1, 0, 0, 0, 1] ++ replicate 1008 0
+        len = fromIntegral $ length testList
+
+
 main :: IO ()
 main = do
   putStrLn test1Checked
@@ -1411,3 +1467,4 @@ main = do
   prettyCheckOfBinaryProgram "program7" testProgram7 [0] [0]
   prettyCheckOfBinaryProgram "program7" testProgram7 [3, 1, 2, 3] [3, 3, 2, 1]
   prettyCheckOfBinaryProgram "program7" testProgram7 [9, 7, 1, 0, 2, 3, 5, 1, 2, 0] [9, 0, 2, 1, 5, 3, 2, 0, 1, 7]
+  program7BigBinaryCheck

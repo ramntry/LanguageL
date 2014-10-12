@@ -414,6 +414,7 @@ programOfExpression env expr =
   foldr (\(x, n) acc -> x ::= C n:. acc) (Write (expr)) env
 
 
+-- Factorial
 testProgram1 :: Statement
 testProgram1 =
   Read "n":.
@@ -426,6 +427,7 @@ testProgram1 =
       "x" ::= V "x" :* V "i"):.
     Write (V "x"))
 
+-- GCD (Euclid)
 testProgram2 =
   Read "a":.
   Read "b":.
@@ -437,6 +439,7 @@ testProgram2 =
         Skip)):.
   Write (V "a" :+ V "b")
 
+-- Fibonacci Sequence
 testProgram3 =
   Read "n":.
   "curr" ::= C 1:.
@@ -447,6 +450,7 @@ testProgram3 =
     "next" ::= V "curr" :+ V "next":.
     "curr" ::= V "tmp")
 
+-- Snake (Spiral traverse of 2D integral plane)
 testProgram6 =
   Read "n":.
   "x" ::= C 0:.
@@ -536,7 +540,7 @@ popMacro name (list, lastPrime) result = let notFoundYet = name "not_found_yet" 
     lastPrime ::= V lastPrime :- C 1:.
     isNotPrimeMacro name lastPrime notFoundYet)
 
-
+-- List Reverse
 testProgram7 = let list = ("list", "last_prime") in
   Read "n":.
   emptyListMacro list:.

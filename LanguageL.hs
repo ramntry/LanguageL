@@ -14,12 +14,14 @@ import Text.ParserCombinators.Parsec.Expr (Operator (..), Assoc (..), buildExpre
 import Data.Char (isAlpha, isDigit, isSpace)
 import Control.Applicative ((<$>), (<*>))
 
-import System.IO (writeFile)
-import System.Directory (doesFileExist)
+import System.IO (stderr, writeFile, hPutStrLn)
+import System.Directory (doesFileExist, findExecutable)
 import System.Cmd (rawSystem)
 import System.Exit (ExitCode (ExitSuccess))
 import System.Process (readProcess)
 
+gccCompatibleCompiler :: FilePath
+gccCompatibleCompiler = "gcc"
 
 type ErrorHandler a = String -> a
 
@@ -1399,9 +1401,15 @@ compileAndWriteBinaryExecutable :: FilePath -> Statement -> IO Bool
 compileAndWriteBinaryExecutable exeFileName program = do
   let sourceFilename = exeFileName ++ ".s"
   compileAndWriteGasSourceFile sourceFilename program
-  gccExitCode <- rawSystem "gcc" ["runtime.c", sourceFilename, "-o", exeFileName]
-  exeOk <- doesFileExist exeFileName
-  return $ assert (gccExitCode == ExitSuccess) exeOk
+  gccExecutable <- findExecutable gccCompatibleCompiler
+  case gccExecutable of
+    Just gccPath -> do
+      gccExitCode <- rawSystem gccPath ["runtime.c", sourceFilename, "-o", exeFileName]
+      exeOk <- doesFileExist exeFileName
+      return $ assert (gccExitCode == ExitSuccess) exeOk
+    Nothing -> do
+      hPutStrLn stderr (gccCompatibleCompiler ++ " not found")
+      return False
 
 
 checkBinaryProgram :: FilePath -> Statement -> Stream -> Stream -> IO Bool
@@ -1454,6 +1462,8 @@ main = do
   putStrLn checkedCompiledProgram3
   putStrLn ("Compiler Output:\n" ++ show (compileProgram testProgram3))
   putStrLn "\n"
+  putStrLn checkedProgram7
+  putStrLn "\n"
   prettyCheckOfBinaryProgram "program1" testProgram1 [8] [40320]
   prettyCheckOfBinaryProgram "program2" testProgram2 [832040, 1346269] [1]
   prettyCheckOfBinaryProgram "program3" testProgram3 [12] [1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144]
@@ -1463,7 +1473,6 @@ main = do
   prettyCheckOfBinaryProgram "program6" testProgram6 [2] [0, 0, 0, 1, 1, 1, 1, 0]
   prettyCheckOfBinaryProgram "program6" testProgram6 [3] [0, 0, 0, 1, 0, 2, 1, 2, 2, 2, 2, 1, 2, 0, 1, 0, 1, 1]
   putStrLn ""
-  putStrLn checkedProgram7
   prettyCheckOfBinaryProgram "program7" testProgram7 [0] [0]
   prettyCheckOfBinaryProgram "program7" testProgram7 [3, 1, 2, 3] [3, 3, 2, 1]
   prettyCheckOfBinaryProgram "program7" testProgram7 [9, 7, 1, 0, 2, 3, 5, 1, 2, 0] [9, 0, 2, 1, 5, 3, 2, 0, 1, 7]

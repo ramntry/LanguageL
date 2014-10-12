@@ -1,6 +1,6 @@
 Реализация интерпретатора для языка L с нестрогой семантикой выражений и
-операциями инкремента и декремента.
-
+операциями инкремента и декремента (для уточнения строгости семантики
+см. раздел 4.)
 
 Модуль LanguageL.hs можно скомплировать и запустить как самостоятельное
 приложение:
@@ -18,6 +18,13 @@ Prelude Main>
 Для краткости далее приглашение командной строки GHCi будем обозначать так:
 
 >
+
+Символом <...> будем обозначать удалённые для экономии места части
+большого по длине вывода GHCi.
+
+Приглашение Bash будем обозначать так:
+
+$
 
 Модуль позволяет:
 
@@ -215,6 +222,16 @@ sema (Inc "a") :: Semantics
 
 Как видно, семантика выражений нестрогая, в частности операторы конъюнкции
 :&& и дизъюнкции :|| вычисляют свои аргументы только если они необходимы.
+Однако если вычисление правой части логического оператора не нужно для
+получения результата этого оператора, но влияет на значение
+переменных, оно будет вычислено:
+
+> eval ["x" .= 1] ((V "x" :|| Dec "x") :* V "x")
+0
+
+> eval ["x" .= 1] ((V "x" :|| Dec "y") :* V "x")
+1
+
 Также логические операторы требуют, чтобы логическое значение было равно 0
 (ложь) или 1 (истина), другие значения приводят к неопределённому
 состоянию. Таким образом, семантическая функция sema определена всюду, а
@@ -285,6 +302,19 @@ while i != 0 do
 read(a);
 read(b);
 write(a + b)
+
+
+С помощью функции programOfExpression можно быстро генерировать программы,
+вычисляющие значение некоторого выражения при заданном окружении (значениях
+переменных):
+
+> :t programOfExpression 
+programOfExpression
+  :: [(VarName, Integer)] -> Expression -> Statement
+
+> programOfExpression ["x" .= 32] (V "x" :+ C 10)
+x := 32;
+write(x + 10)
 
 
 При некоторой сноровке можно записывать достаточно большие программы на
@@ -427,6 +457,9 @@ programSema :: Statement -> Stream -> Stream
 > programSema testProgram2 [12, 21]
 [3]
   -- Программа вычисления наибольшего общего делителя
+
+> programOfExpression ["x" .= 32] (V "x" :+ C 10) |> programSema $ []
+[42]
 
 Она также требует, чтобы выходной поток программы был пуст к моменту
 завершения её работы:
@@ -596,6 +629,419 @@ write(a + b)
 
 > eval ["x" .= 0, "y" .= 1] $ parseExpression "(20 < 10 || x++ == y - x || z) + x++ * y + x"
 4
+
+
+6) Компилировать программу для стековой машины.
+
+Описание стековой машины, её динамической семантики, а также статической
+семантики для компилятора языка L в код этой стековой машины см.
+в документе /doc/languageL_compiler.tex
+
+Тип Instruction реализует инструкции стековой машины:
+
+data Instruction = E                  -- End
+                 | R                  -- Read
+                 | W                  -- Write
+                 | I Integer          -- Const (Immediate)
+                 | L VarName          -- Load
+                 | S VarName          -- Store
+                 | B BinaryOperator   -- BinOp
+                 | J Addr             -- Jump
+                 | JT Addr            -- Jump If True
+                 | JF Addr            -- Jump If False
+
+В качестве метки инструкции стековая машина использует
+её порядковый номер (типа Addr).
+
+Скомпилировать программу можно с помощью функции compileProgram:
+
+> :t compileProgram 
+compileProgram :: Statement -> SMProgram
+
+> testProgram1 |> compileProgram 
+ 0:   Read
+ 1:   Store n
+ 2:   Load n
+ 3:   Const 0
+ 4:   ( < )
+ 5:   JumpIf0 :9
+ 6:   Const 0
+ 7:   Write
+ 8:   Jump :28
+ 9:   Const 1
+<...>
+25:   JumpIf1 :14
+26:   Load x
+27:   Write
+28:   End
+
+> programOfExpression ["x" .= 32] (V "x" :+ C 10) |> compileProgram 
+0:   Const 32
+1:   Store x
+2:   Load x
+3:   Const 10
+4:   ( + )
+5:   Write
+6:   End
+
+Тип SMProgram - лишь простая обёртка над списком инструкций,
+введённая для удобства печати программ для стековой машины:
+
+> :i SMProgram
+newtype SMProgram = SMProgram {getInstructions :: SMInstructions}
+
+Прогаммы для стековой машины можно писать и вручную, для исполнения в
+соответствии с семантикой большого шага можно использовать функцию
+machineSema:
+
+> :t machineSema 
+machineSema :: SMInstructions -> Stream -> Stream
+
+> machineSema [E] []
+[]
+
+> machineSema [R, S "x", L "x", L "x", B Mul, W, E] [10]
+[100]
+
+> testProgram1 |> compileProgram |> getInstructions |> machineSema $ [4]
+[24]
+
+Чтобы получить семантику стековой машины по исходной программе
+на языке L можно воспользоваться также функцией compiledProgramSema:
+
+> :t compiledProgramSema 
+compiledProgramSema :: Statement -> Stream -> Stream
+
+> compiledProgramSema testProgram1 [4]
+[24]
+
+
+7) Комплировать программу в абстрактное представление машинного кода,
+реализующего подмножество набора инструкций платформы x86-64, и выполнять
+над этой формой некоторые преобразования (оптимизации).
+
+Любой инструкции стековой машины можно поставить в соответствие
+от одной до пяти инструкций x86:
+
+> :t machineInstructionToX86 
+machineInstructionToX86 :: Instruction -> [X86Instruction]
+
+> machineInstructionToX86 (B Add)
+[popq  %rcx,addq  %rcx, (%rsp)]
+
+Генерируемый код моделирует поведение стековой машины, в частности,
+в качестве стека (операндов) используется машинный стек. Визуализация
+инструкций осуществляется в синтаксисе AT&T (одно из наиболее заметных
+отличий от синтаксиса Intel - инвертированный порядок операндов).
+
+Строку ассемблерного кода (с опциональной меткой) реализует тип
+X86Line:
+
+> :i X86Line
+data X86Line = X86Line (Maybe X86Label) X86Instruction
+
+
+> :t fromInstr 
+fromInstr :: X86Instruction -> X86Line
+
+> fromInstr (Call (Global "exit"))
+        call  exit
+
+
+> :t setLabel 
+setLabel :: X86Label -> [X86Instruction] -> [X86Line]
+
+> setLabel (Local 10) (machineInstructionToX86 (JT 10)) |> PrintLines
+ .L10:  popq  %rax
+        orq   %rax, %rax
+        jnz   .L10
+
+
+Транслировать программу для стековой машины в код x86 можно так:
+
+> :t machineProgramToX86Lines 
+machineProgramToX86Lines :: SMProgram -> [X86Line]
+
+> programOfExpression [] (C 42) |> compileProgram |> machineProgramToX86Lines |> PrintLines
+ main:  xorq  %rbx, %rbx
+  .L0:  movq  $42, %rdi
+        call  runtime_write
+  .L2:  xorq  %rdi, %rdi
+        call  exit
+
+Можно заметить, что приведённый выше код не однознано соответствует
+коду стековой машины:
+
+> programOfExpression [] (C 42) |> compileProgram
+0:   Const 42
+1:   Write
+2:   End
+
+> programOfExpression [] (C 42) |> compileProgram |> getInstructions |> map machineInstructionToX86 |> map (map fromInstr) |> PrintBlocks
+        pushq $42
+
+        popq  %rdi
+        call  runtime_write
+
+        xorq  %rdi, %rdi
+        call  exit
+
+Это связано с тем, что функция machineProgramToX86Lines выполняет
+постпроцессинг генерируемого кода с целью оптимизации, в данном примере
+были удалены избыточные стековые операции:
+
+> :t optimize 
+optimize :: [X86Line] -> [X86Line]
+
+> programOfExpression [] (C 42) |> compileProgram |> getInstructions |> concatMap  machineInstructionToX86 |> map fromInstr |> optimize |> PrintLines
+  .L0:  movq  $42, %rdi
+        call  runtime_write
+        xorq  %rdi, %rdi
+        call  exit
+
+Также machineProgramToX86Lines добавляет в генерируемый код
+точку входа (метку main) и некоторый код, необходимый для обеспечения
+корректности работы части инструкций.
+
+Ввод, вывод, запуск и останов программы требуют поддержки времени
+исполнения, реализованной на языке C (см. файл runtime.c):
+
+> machineInstructionToX86 E
+[xorq  %rdi, %rdi,call  exit]
+
+> machineInstructionToX86 R
+[call  runtime_read,pushq %rax]
+
+> machineInstructionToX86 W
+[popq  %rdi,call  runtime_write]
+
+
+Часть оптимизаций, например, приведённая выше, выполняются
+поблочно. Разбить код на базовые блоки можно так:
+
+> :t splitByBasicBlockBounds
+splitByBasicBlockBounds :: [X86Line] -> [[X86Line]]
+
+> manyJumpsTestCase |> PrintLines
+ main:  call  runtime_read
+        pushq %rax
+        cmpq  $0, (%rsp)
+        jl    less
+        jg    greater
+        jmp   after_switch
+ less:  movq  $-1, (%rsp)
+        jmp   after_switch
+greater:
+        movq  $1, (%rsp)
+after_switch:
+        popq  %rdi
+        call  runtime_write
+        xorq  %rdi, %rdi
+        call  exit
+
+> manyJumpsTestCase |> splitByBasicBlockBounds |> PrintBlocks 
+ main:  call  runtime_read
+        pushq %rax
+        cmpq  $0, (%rsp)
+        jl    less
+        jmp   .L0
+
+  .L0:  jg    greater
+        jmp   after_switch
+
+ less:  movq  $-1, (%rsp)
+        jmp   after_switch
+
+greater:
+        movq  $1, (%rsp)
+        jmp   after_switch
+
+after_switch:
+        popq  %rdi
+        call  runtime_write
+        xorq  %rdi, %rdi
+        call  exit
+
+
+Сгенерированные блоки на печати отделяются друг от друга пустыми строками.
+При необходимости splitByBasicBlockBounds добавляет метки (.L0 в
+примере). Справедливы следующие утверждения:
+
+1) Блоки можно перемещать друг относительно друга произвольным образом,
+за исключением первого - он должен оставаться первым.
+2) Первая инструкция каждого блока является целью какого-нибудь
+перехода (в частности, первая инструкция всегда имеет метку)
+3) Последняя инструкция каждого базового блока либо безусловный переход,
+либо команда завершения программы.
+4) Невозможна передача управления в середину базового блока или из неё
+куда-либо, за исключением того, что предпоследняя инструкция базового
+блока может быть инструкцией условного перехода. Вызовы подрограмм,
+возвращающие управление, могут быть в середине блока.
+5) Из базового блока управление может быть передно не более, чем на два
+различных блока.
+6) Базовый блок может получить управление из произвольного числа
+других базовых блоков, но любой базовый блок достижим из первого.
+
+Выполнить обратное преобразование можно с помощью функции linearize:
+
+> :t linearize 
+linearize :: [[X86Line]] -> [X86Line]
+
+
+Часть оптимизаций может быть выполена в пределах одной инструкции:
+
+> :t movZeroToXorOpt 
+movZeroToXorOpt :: X86Instruction -> X86Instruction
+
+> movZeroToXorOpt (Mov (Register Rax) (Immediate 0))
+xorq  %rax, %rax
+
+Часть - для всей программы в целом, например - простейшее глобальное
+распределение регистров:
+
+> :t allocateRegistersOpt 
+allocateRegistersOpt :: [X86Line] -> [X86Line]
+
+> [R, S "a", R, S "b", B Add, W] |> concatMap machineInstructionToX86 |> map fromInstr |> PrintLines
+        call  runtime_read
+        pushq %rax
+        popq  var_a
+        call  runtime_read
+        pushq %rax
+        popq  var_b
+        popq  %rcx
+        addq  %rcx, (%rsp)
+        popq  %rdi
+        call  runtime_write
+
+> [R, S "a", R, S "b", B Add, W] |> concatMap machineInstructionToX86 |> map fromInstr |> allocateRegistersOpt |> PrintLines
+        call  runtime_read
+        pushq %rax
+        popq  %r12
+        call  runtime_read
+        pushq %rax
+        popq  %r13
+        popq  %rcx
+        addq  %rcx, (%rsp)
+        popq  %rdi
+        call  runtime_write
+
+
+8) Транслировать абстрактное представление машинного кода x86 в
+программу на языке ассемблера GNU, ассемблировать её и исполнять.
+
+Для генерации текста на языке конкретного ассемблера (GNU Assemlber)
+используются типы GasInstruction, GasLine и др.:
+
+> :i GasLine
+newtype GasLine
+  = GasLine (Level, Maybe X86Label, Maybe GasInstruction)
+
+> :i GasInstruction
+data GasInstruction
+  = GasInstruction X86Instruction | GasDirective GasDirective
+
+Трансляция в конкретное представление включает генерацию директив
+на размещение переменных:
+
+> :i renderGasLines 
+renderGasLines :: [X86Line] -> [GasLine]
+
+> [R, S "a", R, S "b", B Add, W] |> concatMap machineInstructionToX86 |> map fromInstr |> renderGasLines |> PrintGasLines 
+.comm var_a, 8
+.comm var_b, 8
+
+        call  runtime_read
+        pushq %rax
+        popq  var_a
+        call  runtime_read
+        pushq %rax
+        popq  var_b
+        popq  %rcx
+        addq  %rcx, (%rsp)
+        popq  %rdi
+        call  runtime_write
+
+Процесс преобразования программы для стековой машины в текст на языке
+конкретного ассемблера абстрагирован следующими функциями:
+
+> :t renderGasSource 
+renderGasSource :: SMProgram -> GasSource
+
+> :t gasStringOfProgram 
+gasStringOfProgram :: Statement -> String
+
+> testProgram1 |> compileProgram |> renderGasSource 
+.globl main
+
+ main:  xorq  %rbx, %rbx
+  .L0:  call  runtime_read
+  .L1:  movq  %rax, %r12
+  .L2:  pushq %r12
+  .L3:  xorq  %rcx, %rcx
+        popq  %rax
+        cmpq  %rcx, %rax
+        setl  %bl
+  .L5:  movq  %rbx, %rax
+        orq   %rax, %rax
+        jz    .L9
+<...>
+ .L28:  xorq  %rdi, %rdi
+        call  exit
+
+Текст на языке ассемблера можно сохранить в файл:
+
+> :t compileAndWriteGasSourceFile 
+compileAndWriteGasSourceFile :: FilePath -> Statement -> IO ()
+
+> compileAndWriteGasSourceFile "snake.s" testProgram6
+
+$  wc snake.s 
+ 147  443 3258 snake.s
+
+
+При условии существования актуального runtime.c в текущей директории
+и доступности GCC-совместимого компилятора (по умолчанию gcc, может
+быть изменено, см. объявление gasCompatibleCompiler в LanguageL.hs)
+программу можно скомпилировать:
+
+> :t compileAndWriteBinaryExecutable 
+compileAndWriteBinaryExecutable :: FilePath -> Statement -> IO Bool
+
+> compileAndWriteBinaryExecutable "list_reverse" testProgram7 
+True
+
+$ ./list_reverse 
+7
+2 4 6 0 0 1 0
+7
+0
+1
+0
+0
+6
+4
+2
+
+Семантика программ при трансляции в машинное представление претерпевает
+изменения: она становится строгой и исчезает контроль пустоты входного
+потока на момент завершения программы. В остальном "неопределённое"
+поведение стековой машины в большинстве случаев будет проявляться
+аварийным завершением программы.
+
+Весь цикл компиляции в бинарный исполняемый модуль и его запуска с
+некоторыми входными данными и проверки вывода абстрагирован следующим
+образом:
+
+> :t checkBinaryProgram 
+checkBinaryProgram
+  :: FilePath -> Statement -> Stream -> Stream -> IO Bool
+
+> checkBinaryProgram "snake" testProgram6 [2] [0,0, 0,1, 1,1, 1,0]
+True
+
+$ ls -lh snake
+-rwxrwxr-x 8,6K  snake
 
 
 

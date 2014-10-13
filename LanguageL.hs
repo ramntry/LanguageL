@@ -882,11 +882,13 @@ checkedCompiledProgram3 = checkProgram compiledProgramSema testProgram3 [10] [1,
 type Symbol = String
 
 data X86Reg = Rax | Rcx | Rbx | Rdx | Rdi | Rsp | Rbl | R12 | R13 | R14 | R15
+  deriving (Eq)
 
 data X86Operand = Register X86Reg
                 | Symbol Symbol
                 | Immediate Int
                 | Indirect X86Reg
+  deriving (Eq)
 
 data X86Label = Local Addr
               | Global Symbol
@@ -926,7 +928,10 @@ jumpTarget (Jmp label) = Just label
 jumpTarget _ = Nothing
 
 
-data X86Line = X86Line (Maybe X86Label) X86Instruction
+data X86Line = X86Line { getLabel :: Maybe X86Label
+                       , getInstr :: X86Instruction
+                       }
+
 newtype X86LinesPrinter = PrintLines [X86Line]
 newtype X86BasicBlocksPrinter = PrintBlocks [[X86Line]]
 
@@ -947,9 +952,6 @@ setLabel label (i : is) = X86Line (Just label) i : map (X86Line Nothing) is
 
 fromInstr :: X86Instruction -> X86Line
 fromInstr = X86Line Nothing
-
-getInstr :: X86Line -> X86Instruction
-getInstr (X86Line _ instr) = instr
 
 
 getOperands :: X86Instruction -> [X86Operand]
@@ -1185,7 +1187,7 @@ pushPopToMovOpt :: [X86Line] -> [X86Line]
 pushPopToMovOpt [] = []
 pushPopToMovOpt (line1@(X86Line _ (Push (Symbol _))) : line2@(X86Line _ (Pop (Symbol _))) : rest) =
   line1 : line2 : pushPopToMovOpt rest
-pushPopToMovOpt ((X86Line l1 (Push src)) : (X86Line l2 (Pop dst)) : rest) =
+pushPopToMovOpt (X86Line l1 (Push src) : X86Line l2 (Pop dst) : rest) =
   X86Line (l1 `mplus` l2) (Mov dst src) : pushPopToMovOpt rest
 pushPopToMovOpt (line : rest) = line : pushPopToMovOpt rest
 
@@ -1195,13 +1197,36 @@ movPopToMovOpt ((X86Line l1 (Mov (Indirect Rsp) src)) : (X86Line l2 (Pop dst)) :
   X86Line l1 (Mov dst src) : X86Line l2 (XAdd (Register Rsp) (Immediate 8)) : movPopToMovOpt rest
 movPopToMovOpt (line : rest) = line : movPopToMovOpt rest
 
+setCondMovJumpToJumpCond :: [X86Line] -> [X86Line]
+setCondMovJumpToJumpCond [] = []
+setCondMovJumpToJumpCond lines
+  | SetCond cond (Register Rbl)
+  : Mov (Register Rax) (Register Rbx)
+  : Or (Register Rax) (Register Rax)
+  : JmpCond jmpCond label
+  : _ <- map getInstr lines = X86Line (foldr1 mplus $ map getLabel $ take 4 lines)
+                                      (JmpCond (combineConds jmpCond cond) label)
+                            : drop 4 lines
+    where combineConds IfZ IfE = IfNe
+          combineConds IfZ IfNe = IfE
+          combineConds IfZ IfZ = IfNz
+          combineConds IfZ IfNz = IfZ
+          combineConds IfZ IfL = IfGe
+          combineConds IfZ IfG = IfLe
+          combineConds IfZ IfLe = IfG
+          combineConds IfZ IfGe = IfL
+          combineConds IfNz someCond = someCond
+          combineConds _ _ = x86InternalError "setCondMovJumpToJumpCond: unsupported JmpCond condition"
+setCondMovJumpToJumpCond (line : rest) = line : setCondMovJumpToJumpCond rest
+
 doSomePerBasicBlockOptimizations :: [[X86Line] -> [X86Line]] -> [X86Line] -> [X86Line]
 doSomePerBasicBlockOptimizations optimizations =
   linearize . map (foldl (.) id optimizations) . splitByBasicBlockBounds
 
 doPerBasicBlockOptimizations :: [X86Line] -> [X86Line]
 doPerBasicBlockOptimizations = doSomePerBasicBlockOptimizations
-  [ movPopToMovOpt
+  [ setCondMovJumpToJumpCond
+  , movPopToMovOpt
   , pushPopToMovOpt
   ]
 
